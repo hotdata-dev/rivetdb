@@ -1,0 +1,19 @@
+# Worktrees
+.worktrees/
+
+# Rust
+/target/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# OS
+.DS_Store
+
+# Project-specific
+catalog.db*
+cache/
+state/
+

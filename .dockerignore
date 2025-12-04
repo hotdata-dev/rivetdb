@@ -1,0 +1,12 @@
+target/
+!target/release/
+!target/release/server
+.git/
+.gitignore
+*.db
+cache/
+state/
+venv/
+__pycache__/
+*.pyc
+.DS_Store

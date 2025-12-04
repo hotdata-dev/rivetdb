@@ -1,0 +1,47 @@
+[package]
+name = "rivetdb"
+version = "0.0.0"
+edition = "2021"
+
+[[bin]]
+name = "cli"
+path = "src/bin/repl.rs"
+
+[[bin]]
+name = "server"
+path = "src/bin/server.rs"
+
+[dependencies]
+datafusion = "50.2"
+duckdb = { version = "1.4", features = ["bundled"] }
+rustyline = "17.0"
+tokio = { version = "1.47", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+chrono = "0.4"
+async-trait = "0.1"
+tempfile = "3"
+futures = "0.3"
+log = "0.4"
+env_logger = "0.11"
+clap = { version = "4.5", features = ["derive"] }
+arrow-csv = "56.2"
+arrow-json = "56.2"
+tokio-postgres = "0.7"
+postgres-native-tls = "0.5"
+native-tls = "0.2"
+deadpool-postgres = "0.14"
+object_store = { version = "0.12", features = ["aws"] }
+url = "2.5"
+axum = "0.8.7"
+tower = { version = "0.5.2", features = ["util"] }
+tower-http = { version = "0.6.6", features = ["trace", "cors"] }
+config = "0.15.19"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+testcontainers = "0.23"
+testcontainers-modules = { version = "0.11", features = ["postgres"] }
+proptest = "1.6"

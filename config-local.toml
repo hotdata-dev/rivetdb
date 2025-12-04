@@ -1,0 +1,28 @@
+[server]
+host = "127.0.0.1"
+port = 3000
+
+[catalog]
+type = "duckdb"
+## Postgres example
+#[catalog]
+#type = "postgres"
+#host = "localhost"
+#port = 5432
+#database = "rivet"
+#user = "rivetuser"
+#password =
+
+[storage]
+type = "filesystem"
+## S3 Example
+#[storage]
+#type = "s3"
+#bucket = "rivet-cache"
+#region = "us-east-1"
+## Optional: for MinIO/localstack
+#endpoint = "http://localhost:9000"
+
+[paths]
+cache_dir = "~/.hotdata/rivetdb/cache"
+state_dir = "~/.hotdata/rivetdb/state"
