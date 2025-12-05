@@ -1,7 +1,10 @@
 use adbc_core::options::{AdbcVersion, OptionDatabase, OptionValue};
-use adbc_core::{Connection, Database, Driver};
+use adbc_core::{Connection, Database, Driver, Statement};
 use adbc_driver_manager::ManagedDriver;
 use async_trait::async_trait;
+use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::parquet::arrow::ArrowWriter;
+use datafusion::parquet::file::properties::WriterProperties;
 
 use crate::datafetch::{ConnectionConfig, DataFetchError, DataFetcher, TableMetadata};
 use crate::storage::StorageManager;
@@ -81,9 +84,7 @@ impl AdbcFetcher {
         &self,
         batch: &datafusion::arrow::record_batch::RecordBatch,
     ) -> Result<Vec<TableMetadata>, DataFetchError> {
-        use datafusion::arrow::array::{
-            Array, Int16Array, ListArray, StringArray, StructArray,
-        };
+        use datafusion::arrow::array::{Array, ListArray, StringArray, StructArray};
 
         let mut tables = Vec::new();
 
@@ -269,15 +270,79 @@ impl DataFetcher for AdbcFetcher {
 
     async fn fetch_table(
         &self,
-        _config: &ConnectionConfig,
-        _catalog: Option<&str>,
-        _schema: &str,
-        _table: &str,
-        _storage: &dyn StorageManager,
-        _connection_id: i32,
+        config: &ConnectionConfig,
+        catalog: Option<&str>,
+        schema: &str,
+        table: &str,
+        storage: &dyn StorageManager,
+        connection_id: i32,
     ) -> Result<String, DataFetchError> {
-        // TODO: Implement in next task
-        todo!("Implement fetch_table")
+        // Execute query and write to parquet buffer in a separate block
+        // to ensure connection/statement don't cross await boundary
+        let buffer = {
+            let mut connection = self.connect(config)?;
+
+            // Build fully-qualified table name
+            let table_ref = match catalog {
+                Some(cat) => format!("{}.{}.{}", cat, schema, table),
+                None => format!("{}.{}", schema, table),
+            };
+
+            // Create statement and execute query
+            let mut statement = connection
+                .new_statement()
+                .map_err(|e| DataFetchError::Query(e.to_string()))?;
+
+            statement
+                .set_sql_query(format!("SELECT * FROM {}", table_ref))
+                .map_err(|e| DataFetchError::Query(e.to_string()))?;
+
+            let reader = statement
+                .execute()
+                .map_err(|e| DataFetchError::Query(e.to_string()))?;
+
+            // Collect all batches
+            let mut batches: Vec<RecordBatch> = Vec::new();
+            for batch_result in reader {
+                let batch = batch_result.map_err(|e| DataFetchError::Query(e.to_string()))?;
+                batches.push(batch);
+            }
+
+            if batches.is_empty() {
+                return Err(DataFetchError::Query("No data returned from query".into()));
+            }
+
+            // Write to parquet in memory
+            let arrow_schema = batches[0].schema();
+            let mut buffer = Vec::new();
+
+            {
+                let props = WriterProperties::builder().build();
+                let mut writer = ArrowWriter::try_new(&mut buffer, arrow_schema.clone(), Some(props))
+                    .map_err(|e| DataFetchError::Storage(e.to_string()))?;
+
+                for batch in &batches {
+                    writer
+                        .write(batch)
+                        .map_err(|e| DataFetchError::Storage(e.to_string()))?;
+                }
+
+                writer
+                    .close()
+                    .map_err(|e| DataFetchError::Storage(e.to_string()))?;
+            }
+
+            buffer
+        }; // statement and connection dropped here
+
+        // Write to storage (async)
+        let parquet_url = storage.cache_url(connection_id, schema, table);
+        storage
+            .write(&parquet_url, &buffer)
+            .await
+            .map_err(|e| DataFetchError::Storage(e.to_string()))?;
+
+        Ok(parquet_url)
     }
 }
 
