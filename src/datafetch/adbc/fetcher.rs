@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::parquet::arrow::ArrowWriter;
 use datafusion::parquet::file::properties::WriterProperties;
+use std::sync::Arc;
 
 use crate::datafetch::{ConnectionConfig, DataFetchError, DataFetcher, TableMetadata};
 use crate::storage::StorageManager;
@@ -308,6 +309,13 @@ impl DataFetcher for AdbcFetcher {
                 .set_sql_query(format!("SELECT * FROM {}", table_ref))
                 .map_err(|e| DataFetchError::Query(e.to_string()))?;
 
+            // Get the schema before executing to handle empty tables
+            let arrow_schema = Arc::new(
+                statement
+                    .execute_schema()
+                    .map_err(|e| DataFetchError::Query(e.to_string()))?,
+            );
+
             let reader = statement
                 .execute()
                 .map_err(|e| DataFetchError::Query(e.to_string()))?;
@@ -319,12 +327,13 @@ impl DataFetcher for AdbcFetcher {
                 batches.push(batch);
             }
 
+            // If no batches returned, create an empty batch with the correct schema
             if batches.is_empty() {
-                return Err(DataFetchError::Query("No data returned from query".into()));
+                let empty_batch = RecordBatch::new_empty(arrow_schema.clone());
+                batches.push(empty_batch);
             }
 
             // Write to parquet in memory
-            let arrow_schema = batches[0].schema();
             let mut buffer = Vec::new();
 
             {
