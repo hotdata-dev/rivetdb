@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::parquet::arrow::ArrowWriter;
 use datafusion::parquet::file::properties::WriterProperties;
+use log::warn;
 use std::sync::Arc;
 
 use crate::datafetch::{ConnectionConfig, DataFetchError, DataFetcher, TableMetadata};
@@ -367,12 +368,31 @@ impl DataFetcher for AdbcFetcher {
 }
 
 /// Convert SQL type code to Arrow DataType
+///
+/// Maps JDBC/ODBC SQL type codes to Arrow DataTypes. These type codes are defined
+/// in the JDBC specification (java.sql.Types) and ODBC SQL types, and are used
+/// by ADBC drivers in the xdbc_data_type field of column metadata.
+///
+/// Common type codes:
+/// - 0: NULL
+/// - -7, 16: BOOLEAN/BIT
+/// - -6: TINYINT
+/// - 5: SMALLINT
+/// - 4: INTEGER
+/// - -5: BIGINT
+/// - 6, 7: FLOAT/REAL
+/// - 8: DOUBLE
+/// - 2, 3: NUMERIC/DECIMAL
+/// - 1, 12, -1: CHAR/VARCHAR/LONGVARCHAR
+/// - 91, 92, 93: DATE/TIME/TIMESTAMP
+/// - -2, -3, -4: BINARY/VARBINARY/LONGVARBINARY
 fn sql_type_to_arrow(sql_type: i16) -> datafusion::arrow::datatypes::DataType {
     use datafusion::arrow::datatypes::{DataType, TimeUnit};
 
     // Based on JDBC/ODBC type codes
     match sql_type {
-        -7 => DataType::Boolean,          // BIT
+        0 => DataType::Null,              // NULL
+        -7 | 16 => DataType::Boolean,     // BIT, BOOLEAN
         -6 => DataType::Int8,             // TINYINT
         5 => DataType::Int16,             // SMALLINT
         4 => DataType::Int32,             // INTEGER
@@ -386,6 +406,9 @@ fn sql_type_to_arrow(sql_type: i16) -> datafusion::arrow::datatypes::DataType {
         92 => DataType::Time64(TimeUnit::Microsecond), // TIME
         93 => DataType::Timestamp(TimeUnit::Microsecond, None), // TIMESTAMP
         -2 | -3 | -4 => DataType::Binary, // BINARY, VARBINARY, LONGVARBINARY
-        _ => DataType::Utf8,              // Default to string
+        _ => {
+            warn!("Unknown SQL type code {}, defaulting to Utf8", sql_type);
+            DataType::Utf8              // Default to string
+        }
     }
 }
