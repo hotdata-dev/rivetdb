@@ -15,7 +15,7 @@ async fn create_test_manager() -> (
 
     let host_port = container.get_host_port_ipv4(5432).await.unwrap();
     let connection_string = format!(
-        "host=localhost port={} user=postgres password=postgres dbname=postgres sslmode=disable",
+        "postgres://postgres:postgres@localhost:{}/postgres",
         host_port
     );
 
