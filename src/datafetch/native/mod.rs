@@ -34,14 +34,16 @@ impl DataFetcher for NativeFetcher {
     async fn fetch_table(
         &self,
         config: &ConnectionConfig,
-        _catalog: Option<&str>,
-        _schema: &str,
-        _table: &str,
-        _storage: &dyn StorageManager,
-        _connection_id: i32,
+        catalog: Option<&str>,
+        schema: &str,
+        table: &str,
+        storage: &dyn StorageManager,
+        connection_id: i32,
     ) -> Result<String, DataFetchError> {
         match config.source_type.as_str() {
-            "duckdb" | "motherduck" => todo!("DuckDB fetch"),
+            "duckdb" | "motherduck" => {
+                duckdb::fetch_table(config, catalog, schema, table, storage, connection_id).await
+            }
             "postgres" => todo!("PostgreSQL fetch"),
             other => Err(DataFetchError::UnsupportedDriver(other.to_string())),
         }

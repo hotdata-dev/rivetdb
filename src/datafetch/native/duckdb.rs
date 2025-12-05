@@ -97,7 +97,80 @@ pub async fn fetch_table(
     storage: &dyn StorageManager,
     connection_id: i32,
 ) -> Result<String, DataFetchError> {
-    todo!("DuckDB fetch_table")
+    let connection_string = config.connection_string.clone();
+    let schema = schema.to_string();
+    let table = table.to_string();
+
+    // Get the storage URL first (async)
+    let parquet_url = storage.cache_url(connection_id, &schema, &table);
+
+    // DuckDB is sync, so spawn_blocking
+    let buffer = tokio::task::spawn_blocking(move || {
+        fetch_table_sync(&connection_string, &schema, &table)
+    })
+    .await
+    .map_err(|e| DataFetchError::Query(e.to_string()))??;
+
+    // Write to storage (async)
+    storage
+        .write(&parquet_url, &buffer)
+        .await
+        .map_err(|e| DataFetchError::Storage(e.to_string()))?;
+
+    Ok(parquet_url)
+}
+
+fn fetch_table_sync(
+    connection_string: &str,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<u8>, DataFetchError> {
+    use datafusion::arrow::record_batch::RecordBatch;
+    use datafusion::parquet::arrow::ArrowWriter;
+
+    let conn = Connection::open(connection_string)
+        .map_err(|e| DataFetchError::Connection(e.to_string()))?;
+
+    let query = format!(
+        "SELECT * FROM \"{}\".\"{}\"",
+        schema.replace('"', "\"\""),
+        table.replace('"', "\"\"")
+    );
+
+    let mut stmt = conn
+        .prepare(&query)
+        .map_err(|e| DataFetchError::Query(e.to_string()))?;
+
+    // DuckDB returns Arrow natively
+    let arrow_result = stmt
+        .query_arrow([])
+        .map_err(|e| DataFetchError::Query(e.to_string()))?;
+
+    // Get schema before collecting batches
+    let arrow_schema = arrow_result.get_schema();
+
+    // Collect batches
+    let batches: Vec<RecordBatch> = arrow_result.collect();
+
+    // Write to buffer
+    let mut buffer = Vec::new();
+
+    {
+        let mut writer = ArrowWriter::try_new(&mut buffer, arrow_schema.clone(), None)
+            .map_err(|e| DataFetchError::Storage(e.to_string()))?;
+
+        for batch in batches {
+            writer
+                .write(&batch)
+                .map_err(|e| DataFetchError::Storage(e.to_string()))?;
+        }
+
+        writer
+            .close()
+            .map_err(|e| DataFetchError::Storage(e.to_string()))?;
+    }
+
+    Ok(buffer)
 }
 
 /// Convert DuckDB type name to Arrow DataType
