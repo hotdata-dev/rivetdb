@@ -123,6 +123,15 @@ impl DuckdbCatalogManager {
             conn.execute("INSERT INTO schema_migrations (version) VALUES (1)", [])?;
         }
 
+        // Migration 2: Add arrow_schema_json column to tables
+        if current_version < 2 {
+            conn.execute(
+                "ALTER TABLE tables ADD COLUMN IF NOT EXISTS arrow_schema_json TEXT",
+                [],
+            )?;
+            conn.execute("INSERT INTO schema_migrations (version) VALUES (2)", [])?;
+        }
+
         Ok(())
     }
 
@@ -135,6 +144,7 @@ impl DuckdbCatalogManager {
             parquet_path: row.get(4)?,
             state_path: row.get(5)?,
             last_sync: row.get(6)?,
+            arrow_schema_json: row.get(7)?,
         })
     }
 }
@@ -253,7 +263,7 @@ impl CatalogManager for DuckdbCatalogManager {
         if let Some(conn_id) = connection_id {
             let mut stmt = conn.prepare(
                 "SELECT id, connection_id, schema_name, table_name, parquet_path, state_path, \
-                 CAST(last_sync AS VARCHAR) as last_sync \
+                 CAST(last_sync AS VARCHAR) as last_sync, arrow_schema_json \
                  FROM tables WHERE connection_id = ? ORDER BY schema_name, table_name",
             )?;
             let rows = stmt.query_map(params![conn_id], DuckdbCatalogManager::table_mapper)?;
@@ -264,7 +274,7 @@ impl CatalogManager for DuckdbCatalogManager {
         } else {
             let mut stmt = conn.prepare(
                 "SELECT id, connection_id, schema_name, table_name, parquet_path, state_path, \
-                 CAST(last_sync AS VARCHAR) as last_sync \
+                 CAST(last_sync AS VARCHAR) as last_sync, arrow_schema_json \
                  FROM tables ORDER BY schema_name, table_name",
             )?;
             let rows = stmt.query_map([], DuckdbCatalogManager::table_mapper)?;
@@ -288,7 +298,7 @@ impl CatalogManager for DuckdbCatalogManager {
 
         let mut stmt = conn.prepare(
             "SELECT id, connection_id, schema_name, table_name, parquet_path, state_path, \
-             CAST(last_sync AS VARCHAR) as last_sync \
+             CAST(last_sync AS VARCHAR) as last_sync, arrow_schema_json \
              FROM tables WHERE connection_id = ? AND schema_name = ? AND table_name = ?",
         )?;
 
@@ -314,6 +324,21 @@ impl CatalogManager for DuckdbCatalogManager {
         conn.execute(
             "UPDATE tables SET parquet_path = ?, state_path = ?, last_sync = CURRENT_TIMESTAMP WHERE id = ?",
             params![parquet_path, state_path, table_id],
+        )?;
+        Ok(())
+    }
+
+    fn update_table_schema(&self, table_id: i32, arrow_schema_json: &str) -> Result<()> {
+        if self.readonly {
+            anyhow::bail!("Cannot update table schema in readonly mode");
+        }
+
+        let conn_guard = self.get_connection_guard()?;
+        let conn = conn_guard.as_ref().unwrap(); // Safe: get_connection_guard verified it's Some
+
+        conn.execute(
+            "UPDATE tables SET arrow_schema_json = ? WHERE id = ?",
+            params![arrow_schema_json, table_id],
         )?;
         Ok(())
     }

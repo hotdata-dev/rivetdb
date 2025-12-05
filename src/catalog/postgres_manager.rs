@@ -83,6 +83,14 @@ impl PostgresCatalogManager {
             )
             .await?;
 
+        // Add arrow_schema_json column if it doesn't exist (migration)
+        client
+            .execute(
+                "ALTER TABLE tables ADD COLUMN IF NOT EXISTS arrow_schema_json TEXT",
+                &[],
+            )
+            .await?;
+
         Ok(())
     }
 
@@ -187,14 +195,14 @@ impl CatalogManager for PostgresCatalogManager {
             let rows = if let Some(conn_id) = connection_id {
                 client.query(
                     "SELECT id, connection_id, schema_name, table_name, parquet_path, state_path, \
-                     CAST(last_sync AS VARCHAR) as last_sync \
+                     CAST(last_sync AS VARCHAR) as last_sync, arrow_schema_json \
                      FROM tables WHERE connection_id = $1 ORDER BY schema_name, table_name",
                     &[&conn_id],
                 ).await?
             } else {
                 client.query(
                     "SELECT id, connection_id, schema_name, table_name, parquet_path, state_path, \
-                     CAST(last_sync AS VARCHAR) as last_sync \
+                     CAST(last_sync AS VARCHAR) as last_sync, arrow_schema_json \
                      FROM tables ORDER BY schema_name, table_name",
                     &[],
                 ).await?
@@ -210,6 +218,7 @@ impl CatalogManager for PostgresCatalogManager {
                     parquet_path: row.get(4),
                     state_path: row.get(5),
                     last_sync: row.get(6),
+                    arrow_schema_json: row.get(7),
                 })
                 .collect();
 
@@ -229,7 +238,7 @@ impl CatalogManager for PostgresCatalogManager {
             let rows = client
                 .query(
                     "SELECT id, connection_id, schema_name, table_name, parquet_path, state_path, \
-                 CAST(last_sync AS VARCHAR) as last_sync \
+                 CAST(last_sync AS VARCHAR) as last_sync, arrow_schema_json \
                  FROM tables WHERE connection_id = $1 AND schema_name = $2 AND table_name = $3",
                     &[&connection_id, &schema_name, &table_name],
                 )
@@ -244,6 +253,7 @@ impl CatalogManager for PostgresCatalogManager {
                     parquet_path: row.get(4),
                     state_path: row.get(5),
                     last_sync: row.get(6),
+                    arrow_schema_json: row.get(7),
                 }))
             } else {
                 Ok(None)
@@ -258,6 +268,18 @@ impl CatalogManager for PostgresCatalogManager {
             client.execute(
                 "UPDATE tables SET parquet_path = $1, state_path = $2, last_sync = CURRENT_TIMESTAMP WHERE id = $3",
                 &[&parquet_path, &state_path, &table_id],
+            ).await?;
+            Ok(())
+        })
+    }
+
+    fn update_table_schema(&self, table_id: i32, arrow_schema_json: &str) -> Result<()> {
+        self.block_on(async {
+            let client = self.pool.get().await?;
+
+            client.execute(
+                "UPDATE tables SET arrow_schema_json = $1 WHERE id = $2",
+                &[&arrow_schema_json, &table_id],
             ).await?;
             Ok(())
         })
