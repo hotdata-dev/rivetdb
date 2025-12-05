@@ -39,3 +39,14 @@ impl From<std::io::Error> for DataFetchError {
         DataFetchError::Storage(e.to_string())
     }
 }
+
+impl From<sqlx::Error> for DataFetchError {
+    fn from(e: sqlx::Error) -> Self {
+        match &e {
+            sqlx::Error::Configuration(_) => DataFetchError::Connection(e.to_string()),
+            sqlx::Error::Database(_) => DataFetchError::Query(e.to_string()),
+            sqlx::Error::Io(_) => DataFetchError::Connection(e.to_string()),
+            _ => DataFetchError::Connection(e.to_string()),
+        }
+    }
+}
