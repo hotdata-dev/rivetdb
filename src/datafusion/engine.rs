@@ -157,7 +157,7 @@ impl HotDataEngine {
 
         // Discover tables
         info!("Discovering tables for {} source...", source_type);
-        let fetcher = crate::datafetch::AdbcFetcher::new();
+        let fetcher = crate::datafetch::NativeFetcher::new();
         let tables = fetcher.discover_tables(&fetch_config).await
             .map_err(|e| anyhow::anyhow!("Discovery failed: {}", e))?;
 

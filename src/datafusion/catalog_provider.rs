@@ -1,6 +1,6 @@
 use super::schema_provider::HotDataSchemaProvider;
 use crate::catalog::CatalogManager;
-use crate::datafetch::{AdbcFetcher, DataFetcher};
+use crate::datafetch::{DataFetcher, NativeFetcher};
 use crate::storage::StorageManager;
 use async_trait::async_trait;
 use datafusion::catalog::{CatalogProvider, SchemaProvider};
@@ -35,7 +35,7 @@ impl HotDataCatalogProvider {
             catalog,
             schemas: Arc::new(RwLock::new(HashMap::new())),
             storage,
-            fetcher: Arc::new(AdbcFetcher::new()),
+            fetcher: Arc::new(NativeFetcher::new()),
         }
     }
 
