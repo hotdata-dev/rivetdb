@@ -179,15 +179,12 @@ impl HotDataEngine {
         let config_json = serde_json::to_string(&config_with_type)?;
         let conn_id = self.catalog.add_connection(name, source_type, &config_json)?;
 
-        // Add discovered tables to catalog
+        // Add discovered tables to catalog with schema in one call
         for table in &tables {
-            let table_id = self.catalog.add_table(conn_id, &table.schema_name, &table.table_name)?;
-
-            // Store Arrow schema as JSON
             let schema = table.to_arrow_schema();
             let schema_json = serde_json::to_string(schema.as_ref())
                 .map_err(|e| anyhow::anyhow!("Failed to serialize schema: {}", e))?;
-            self.catalog.update_table_schema(table_id, &schema_json)?;
+            self.catalog.add_table(conn_id, &table.schema_name, &table.table_name, &schema_json)?;
         }
 
         // Register with DataFusion

@@ -139,14 +139,19 @@ impl CatalogManager for PostgresCatalogManager {
         })
     }
 
-    fn add_table(&self, connection_id: i32, schema_name: &str, table_name: &str) -> Result<i32> {
+    fn add_table(&self, connection_id: i32, schema_name: &str, table_name: &str, arrow_schema_json: &str) -> Result<i32> {
         self.block_on(async {
+            // Insert or update table with schema
             sqlx::query(
-                "INSERT INTO tables (connection_id, schema_name, table_name) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+                "INSERT INTO tables (connection_id, schema_name, table_name, arrow_schema_json)
+                 VALUES ($1, $2, $3, $4)
+                 ON CONFLICT (connection_id, schema_name, table_name)
+                 DO UPDATE SET arrow_schema_json = $4",
             )
             .bind(connection_id)
             .bind(schema_name)
             .bind(table_name)
+            .bind(arrow_schema_json)
             .execute(&self.pool)
             .await?;
 

@@ -231,7 +231,7 @@ impl CatalogManager for DuckdbCatalogManager {
         }
     }
 
-    fn add_table(&self, connection_id: i32, schema_name: &str, table_name: &str) -> Result<i32> {
+    fn add_table(&self, connection_id: i32, schema_name: &str, table_name: &str, arrow_schema_json: &str) -> Result<i32> {
         if self.readonly {
             anyhow::bail!("Cannot add table in readonly mode");
         }
@@ -239,10 +239,11 @@ impl CatalogManager for DuckdbCatalogManager {
         let conn_guard = self.get_connection_guard()?;
         let conn = conn_guard.as_ref().unwrap(); // Safe: get_connection_guard verified it's Some
 
-        // add table to catalog. if we already know about the table (we're reimporting connection), ignore it
+        // Insert or update table with schema
         conn.execute(
-            "INSERT INTO tables (connection_id, schema_name, table_name) VALUES (?, ?, ?) ON CONFLICT DO NOTHING",
-            params![connection_id, schema_name, table_name],
+            "INSERT INTO tables (connection_id, schema_name, table_name, arrow_schema_json) VALUES (?, ?, ?, ?)
+             ON CONFLICT (connection_id, schema_name, table_name) DO UPDATE SET arrow_schema_json = excluded.arrow_schema_json",
+            params![connection_id, schema_name, table_name, arrow_schema_json],
         )?;
 
         let id: i32 = conn.query_row(

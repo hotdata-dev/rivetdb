@@ -16,8 +16,8 @@ fn test_full_connection_workflow() {
         .unwrap();
 
     // Add some tables
-    catalog.add_table(conn_id, "public", "users").unwrap();
-    catalog.add_table(conn_id, "public", "orders").unwrap();
+    catalog.add_table(conn_id, "public", "users", "").unwrap();
+    catalog.add_table(conn_id, "public", "orders", "").unwrap();
 
     // List connections
     let connections = catalog.list_connections().unwrap();
