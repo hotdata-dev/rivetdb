@@ -2,7 +2,7 @@ use axum::{extract::Query as QueryParams, extract::State, http::StatusCode, Json
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
-
+use tracing::error;
 use crate::datafusion::HotDataEngine;
 use crate::http::error::ApiError;
 use crate::http::models::{
@@ -165,6 +165,7 @@ pub async fn create_connection_handler(
         .connect(&request.source_type, &request.name, request.config)
         .await
         .map_err(|e| {
+            error!("Failed to connect to database: {}", e);
             // Extract root cause message only - don't expose full stack trace to clients
             let root_cause = e.root_cause().to_string();
             let msg = root_cause.lines().next().unwrap_or("Unknown error");
