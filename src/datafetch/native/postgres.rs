@@ -8,11 +8,37 @@ use crate::datafetch::{ColumnMetadata, ConnectionConfig, DataFetchError, TableMe
 use super::arrow_convert::pg_type_to_arrow;
 use super::StreamingParquetWriter;
 
+/// Connect to PostgreSQL with automatic SSL retry.
+/// If the initial connection fails with an "insecure connection" error,
+/// automatically retries with `sslmode=require` appended to the connection string.
+async fn connect_with_ssl_retry(connection_string: &str) -> Result<PgConnection, sqlx::Error> {
+    match PgConnection::connect(connection_string).await {
+        Ok(conn) => Ok(conn),
+        Err(e) => {
+            let error_msg = e.to_string();
+            // Check if the error indicates SSL is required
+            if error_msg.contains("connection is insecure")
+                || error_msg.contains("sslmode=require")
+            {
+                // Append sslmode=require and retry
+                let ssl_connection_string = if connection_string.contains('?') {
+                    format!("{}&sslmode=require", connection_string)
+                } else {
+                    format!("{}?sslmode=require", connection_string)
+                };
+                PgConnection::connect(&ssl_connection_string).await
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
 /// Discover tables and columns from PostgreSQL
 pub async fn discover_tables(
     config: &ConnectionConfig,
 ) -> Result<Vec<TableMetadata>, DataFetchError> {
-    let mut conn = PgConnection::connect(&config.connection_string).await?;
+    let mut conn = connect_with_ssl_retry(&config.connection_string).await?;
 
     let rows = sqlx::query(
         r#"
@@ -89,7 +115,7 @@ pub async fn fetch_table(
 
     use super::arrow_convert::{rows_to_batch, schema_from_columns};
 
-    let mut conn = PgConnection::connect(&config.connection_string).await?;
+    let mut conn = connect_with_ssl_retry(&config.connection_string).await?;
 
     // Build query - properly escape identifiers
     let query = format!(
