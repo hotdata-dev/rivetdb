@@ -1,6 +1,7 @@
 use super::catalog_provider::HotDataCatalogProvider;
 use crate::catalog::{CatalogManager, ConnectionInfo, DuckdbCatalogManager, TableInfo};
 use crate::datafetch::DataFetcher;
+use crate::source::Source;
 use crate::storage::{FilesystemStorage, StorageManager};
 use anyhow::Result;
 use datafusion::arrow::record_batch::RecordBatch;
@@ -10,96 +11,11 @@ use log::{info, warn};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tracing::error;
 
 pub struct QueryResponse {
     pub results: Vec<RecordBatch>,
     pub execution_time: Duration,
-}
-
-/// Build a connection string from individual config parameters based on source type.
-/// Supports both explicit `connection_string` field or building from components.
-fn build_connection_string(source_type: &str, config: &serde_json::Value) -> Result<String> {
-    // If connection_string is provided directly, use it
-    if let Some(conn_str) = config.get("connection_string").and_then(|v| v.as_str()) {
-        return Ok(conn_str.to_string());
-    }
-
-    // Build from individual parameters based on source type
-    match source_type {
-        "postgres" => {
-            let user = config
-                .get("user")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("postgres config requires 'user' field"))?;
-            let password = config
-                .get("password")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let host = config
-                .get("host")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("postgres config requires 'host' field"))?;
-            let port = config
-                .get("port")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(5432);
-            let database = config
-                .get("database")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("postgres config requires 'database' field"))?;
-
-            Ok(format!(
-                "postgresql://{}:{}@{}:{}/{}",
-                user, password, host, port, database
-            ))
-        }
-        "duckdb" => {
-            let path = config
-                .get("path")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("duckdb config requires 'path' field"))?;
-            Ok(path.to_string())
-        }
-        "motherduck" => {
-            let token = config
-                .get("token")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("motherduck config requires 'token' field"))?;
-            let database = config
-                .get("database")
-                .and_then(|v| v.as_str())
-                .unwrap_or("my_db");
-            Ok(format!("md:{}?motherduck_token={}", database, token))
-        }
-        "snowflake" => {
-            let account = config
-                .get("account")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("snowflake config requires 'account' field"))?;
-            let user = config
-                .get("user")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("snowflake config requires 'user' field"))?;
-            let password = config
-                .get("password")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("snowflake config requires 'password' field"))?;
-            let database = config
-                .get("database")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("snowflake config requires 'database' field"))?;
-            let warehouse = config
-                .get("warehouse")
-                .and_then(|v| v.as_str())
-                .unwrap_or("COMPUTE_WH");
-
-            Ok(format!(
-                "{}:{}@{}/{}/{}",
-                user, password, account, database, warehouse
-            ))
-        }
-        _ => anyhow::bail!("Unknown source type: {}", source_type),
-    }
 }
 
 /// The main query engine that manages connections, catalogs, and query execution.
@@ -203,12 +119,12 @@ impl HotDataEngine {
         let connections = self.catalog.list_connections()?;
 
         for conn in connections {
-            let config: serde_json::Value = serde_json::from_str(&conn.config_json)?;
+            let source: Source = serde_json::from_str(&conn.config_json)?;
 
             let catalog_provider = Arc::new(HotDataCatalogProvider::new(
                 conn.id,
                 conn.name.clone(),
-                config,
+                Arc::new(source),
                 self.catalog.clone(),
                 self.storage.clone(),
             )) as Arc<dyn CatalogProvider>;
@@ -220,45 +136,19 @@ impl HotDataEngine {
     }
 
     /// Connect to a new external data source and register it as a catalog.
-    pub async fn connect(&self, source_type: &str, name: &str, config: serde_json::Value) -> Result<()> {
-        // Validate source type
-        if !["postgres", "snowflake", "motherduck", "duckdb"].contains(&source_type) {
-            anyhow::bail!(
-                "Unsupported source type '{}'. Supported types: postgres, snowflake, motherduck, duckdb",
-                source_type
-            );
-        }
-
-        // Build connection config
-        let connection_string = build_connection_string(source_type, &config)?;
-
-        let fetch_config = crate::datafetch::ConnectionConfig {
-            source_type: source_type.to_string(),
-            connection_string,
-        };
+    pub async fn connect(&self, name: &str, source: Source) -> Result<()> {
+        let source_type = source.source_type();
 
         // Discover tables
         info!("Discovering tables for {} source...", source_type);
         let fetcher = crate::datafetch::NativeFetcher::new();
-        let tables = fetcher.discover_tables(&fetch_config).await
+        let tables = fetcher.discover_tables(&source).await
             .map_err(|e| anyhow::anyhow!("Discovery failed: {}", e))?;
 
         info!("Discovered {} tables", tables.len());
 
-        // Add connection to catalog
-        let config_with_type = {
-            let mut obj = match config {
-                serde_json::Value::Object(m) => m,
-                _ => anyhow::bail!("Configuration must be a JSON object"),
-            };
-            obj.insert(
-                "type".to_string(),
-                serde_json::Value::String(source_type.to_string()),
-            );
-            serde_json::Value::Object(obj)
-        };
-
-        let config_json = serde_json::to_string(&config_with_type)?;
+        // Store config as JSON (includes "type" from serde tag)
+        let config_json = serde_json::to_string(&source)?;
         let conn_id = self.catalog.add_connection(name, source_type, &config_json)?;
 
         // Add discovered tables to catalog with schema in one call
@@ -273,7 +163,7 @@ impl HotDataEngine {
         let catalog_provider = Arc::new(HotDataCatalogProvider::new(
             conn_id,
             name.to_string(),
-            config_with_type,
+            Arc::new(source),
             self.catalog.clone(),
             self.storage.clone(),
         )) as Arc<dyn CatalogProvider>;
@@ -311,9 +201,23 @@ impl HotDataEngine {
 
     /// Execute a SQL query and return the results.
     pub async fn execute_query(&self, sql: &str) -> Result<QueryResponse> {
+        info!("Executing query: {}", sql);
         let start = Instant::now();
-        let df = self.df_ctx.sql(sql).await?;
-        let results = df.collect().await?;
+        let df = self.df_ctx
+            .sql(sql)
+            .await
+            .map_err(|e| {
+                error!("Error executing query: {}", e);
+                e
+            })?;
+        info!("Execution completed in {:?}", start.elapsed());
+        let results = df.collect()
+            .await
+            .map_err(|e| {
+                error!("Error getting query result: {}", e);
+                e
+            })?;
+        info!("Results available");
 
         Ok(QueryResponse {
             execution_time: start.elapsed(),
@@ -334,12 +238,12 @@ impl HotDataEngine {
 
         // Step 2: Re-register the connection with fresh state
         // This causes DataFusion to drop any open file handles to the cached files
-        let config: serde_json::Value = serde_json::from_str(&conn.config_json)?;
+        let source: Source = serde_json::from_str(&conn.config_json)?;
 
         let catalog_provider = Arc::new(HotDataCatalogProvider::new(
             conn.id,
             conn.name.clone(),
-            config,
+            Arc::new(source),
             self.catalog.clone(),
             self.storage.clone(),
         )) as Arc<dyn CatalogProvider>;
@@ -374,12 +278,12 @@ impl HotDataEngine {
 
         // Step 2: Re-register the connection with fresh state
         // This causes DataFusion to drop any open file handles to the cached files
-        let config: serde_json::Value = serde_json::from_str(&conn.config_json)?;
+        let source: Source = serde_json::from_str(&conn.config_json)?;
 
         let catalog_provider = Arc::new(HotDataCatalogProvider::new(
             conn.id,
             conn.name.clone(),
-            config,
+            Arc::new(source),
             self.catalog.clone(),
             self.storage.clone(),
         )) as Arc<dyn CatalogProvider>;

@@ -3,7 +3,8 @@
 use sqlx::postgres::PgConnection;
 use sqlx::{Connection, Row};
 
-use crate::datafetch::{ColumnMetadata, ConnectionConfig, DataFetchError, TableMetadata};
+use crate::datafetch::{ColumnMetadata, DataFetchError, TableMetadata};
+use crate::source::Source;
 
 use super::arrow_convert::pg_type_to_arrow;
 use super::StreamingParquetWriter;
@@ -35,10 +36,8 @@ async fn connect_with_ssl_retry(connection_string: &str) -> Result<PgConnection,
 }
 
 /// Discover tables and columns from PostgreSQL
-pub async fn discover_tables(
-    config: &ConnectionConfig,
-) -> Result<Vec<TableMetadata>, DataFetchError> {
-    let mut conn = connect_with_ssl_retry(&config.connection_string).await?;
+pub async fn discover_tables(source: &Source) -> Result<Vec<TableMetadata>, DataFetchError> {
+    let mut conn = connect_with_ssl_retry(&source.connection_string()).await?;
 
     let rows = sqlx::query(
         r#"
@@ -103,7 +102,7 @@ pub async fn discover_tables(
 
 /// Fetch table data and write to Parquet
 pub async fn fetch_table(
-    config: &ConnectionConfig,
+    source: &Source,
     _catalog: Option<&str>,
     schema: &str,
     table: &str,
@@ -115,7 +114,7 @@ pub async fn fetch_table(
 
     use super::arrow_convert::{rows_to_batch, schema_from_columns};
 
-    let mut conn = connect_with_ssl_retry(&config.connection_string).await?;
+    let mut conn = connect_with_ssl_retry(&source.connection_string()).await?;
 
     // Build query - properly escape identifiers
     let query = format!(

@@ -2,13 +2,14 @@
 
 use duckdb::Connection;
 
-use crate::datafetch::{ColumnMetadata, ConnectionConfig, DataFetchError, TableMetadata};
+use crate::datafetch::{ColumnMetadata, DataFetchError, TableMetadata};
+use crate::source::Source;
 
 use super::StreamingParquetWriter;
 
 /// Discover tables and columns from DuckDB/MotherDuck
-pub async fn discover_tables(config: &ConnectionConfig) -> Result<Vec<TableMetadata>, DataFetchError> {
-    let connection_string = config.connection_string.clone();
+pub async fn discover_tables(source: &Source) -> Result<Vec<TableMetadata>, DataFetchError> {
+    let connection_string = source.connection_string();
 
     tokio::task::spawn_blocking(move || discover_tables_sync(&connection_string))
         .await
@@ -91,7 +92,7 @@ fn discover_tables_sync(connection_string: &str) -> Result<Vec<TableMetadata>, D
 
 /// Fetch table data and write to Parquet
 pub async fn fetch_table(
-    config: &ConnectionConfig,
+    source: &Source,
     _catalog: Option<&str>,
     schema: &str,
     table: &str,
@@ -100,7 +101,7 @@ pub async fn fetch_table(
     use datafusion::arrow::record_batch::RecordBatch;
     use std::sync::Arc;
 
-    let connection_string = config.connection_string.clone();
+    let connection_string = source.connection_string();
     let schema = schema.to_string();
     let table = table.to_string();
 

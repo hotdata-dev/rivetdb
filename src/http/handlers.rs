@@ -5,6 +5,7 @@ use std::time::Instant;
 use tracing::error;
 use crate::datafusion::HotDataEngine;
 use crate::http::error::ApiError;
+use crate::source::Source;
 use crate::http::models::{
     ConnectionInfo, CreateConnectionRequest, CreateConnectionResponse, ListConnectionsResponse,
     QueryRequest, QueryResponse, TableInfo, TablesResponse,
@@ -160,9 +161,29 @@ pub async fn create_connection_handler(
         )));
     }
 
+    // Merge source_type into config as "type" for Source enum deserialization
+    let config_with_type = {
+        let mut obj = match request.config {
+            serde_json::Value::Object(m) => m,
+            _ => return Err(ApiError::bad_request("Configuration must be a JSON object")),
+        };
+        obj.insert(
+            "type".to_string(),
+            serde_json::Value::String(request.source_type.clone()),
+        );
+        serde_json::Value::Object(obj)
+    };
+
+    // Deserialize to Source enum
+    let source: Source = serde_json::from_value(config_with_type).map_err(|e| {
+        ApiError::bad_request(format!("Invalid source configuration: {}", e))
+    })?;
+
+    let source_type = source.source_type().to_string();
+
     // Attempt to connect (discovers tables and registers catalog)
     engine
-        .connect(&request.source_type, &request.name, request.config)
+        .connect(&request.name, source)
         .await
         .map_err(|e| {
             error!("Failed to connect to database: {}", e);
@@ -191,7 +212,7 @@ pub async fn create_connection_handler(
         StatusCode::CREATED,
         Json(CreateConnectionResponse {
             name: request.name,
-            source_type: request.source_type,
+            source_type,
             tables_discovered,
         }),
     ))

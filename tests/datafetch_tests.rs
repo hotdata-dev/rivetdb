@@ -1,16 +1,16 @@
 //! Integration tests for datafetch module
 
-use rivetdb::datafetch::{ConnectionConfig, DataFetcher, NativeFetcher};
+use rivetdb::datafetch::{DataFetcher, NativeFetcher};
+use rivetdb::source::Source;
 
 #[tokio::test]
 async fn test_duckdb_discovery_empty() {
     let fetcher = NativeFetcher::new();
-    let config = ConnectionConfig {
-        source_type: "duckdb".to_string(),
-        connection_string: ":memory:".to_string(),
+    let source = Source::Duckdb {
+        path: ":memory:".to_string(),
     };
 
-    let result = fetcher.discover_tables(&config).await;
+    let result = fetcher.discover_tables(&source).await;
     assert!(result.is_ok(), "Discovery should succeed: {:?}", result.err());
 
     let tables = result.unwrap();
@@ -35,12 +35,11 @@ async fn test_duckdb_discovery_with_table() {
     }
 
     let fetcher = NativeFetcher::new();
-    let config = ConnectionConfig {
-        source_type: "duckdb".to_string(),
-        connection_string: db_path.to_str().unwrap().to_string(),
+    let source = Source::Duckdb {
+        path: db_path.to_str().unwrap().to_string(),
     };
 
-    let result = fetcher.discover_tables(&config).await;
+    let result = fetcher.discover_tables(&source).await;
     assert!(result.is_ok(), "Discovery should succeed: {:?}", result.err());
 
     let tables = result.unwrap();
@@ -58,12 +57,17 @@ async fn test_duckdb_discovery_with_table() {
 #[tokio::test]
 async fn test_unsupported_driver() {
     let fetcher = NativeFetcher::new();
-    let config = ConnectionConfig {
-        source_type: "unsupported_db".to_string(),
-        connection_string: "fake://connection".to_string(),
+    // Use a Snowflake source which is not implemented
+    let source = Source::Snowflake {
+        account: "fake".to_string(),
+        user: "fake".to_string(),
+        password: "fake".to_string(),
+        warehouse: "fake".to_string(),
+        database: "fake".to_string(),
+        role: None,
     };
 
-    let result = fetcher.discover_tables(&config).await;
+    let result = fetcher.discover_tables(&source).await;
     assert!(result.is_err(), "Should fail for unsupported driver");
 }
 
@@ -104,16 +108,15 @@ async fn test_duckdb_fetch_table() {
 
     // Fetch to parquet using StreamingParquetWriter
     let fetcher = NativeFetcher::new();
-    let config = ConnectionConfig {
-        source_type: "duckdb".to_string(),
-        connection_string: db_path.to_str().unwrap().to_string(),
+    let source = Source::Duckdb {
+        path: db_path.to_str().unwrap().to_string(),
     };
 
     let output_path = temp_dir.path().join("output.parquet");
     let mut writer = StreamingParquetWriter::new(output_path.clone());
 
     let result = fetcher
-        .fetch_table(&config, None, "test_schema", "products", &mut writer)
+        .fetch_table(&source, None, "test_schema", "products", &mut writer)
         .await;
     assert!(result.is_ok(), "Fetch should succeed: {:?}", result.err());
 

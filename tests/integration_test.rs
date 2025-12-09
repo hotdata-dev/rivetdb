@@ -34,7 +34,8 @@ fn test_full_connection_workflow() {
 #[tokio::test]
 async fn test_duckdb_sync_and_query() {
     use datafusion::prelude::*;
-    use rivetdb::datafetch::{ConnectionConfig, DataFetcher, NativeFetcher, StreamingParquetWriter};
+    use rivetdb::datafetch::{DataFetcher, NativeFetcher, StreamingParquetWriter};
+    use rivetdb::source::Source;
     use rivetdb::storage::{FilesystemStorage, StorageManager};
 
     // Create temp directories
@@ -77,9 +78,8 @@ async fn test_duckdb_sync_and_query() {
 
     // Use NativeFetcher with StreamingParquetWriter
     let fetcher = NativeFetcher::new();
-    let config = ConnectionConfig {
-        source_type: "duckdb".to_string(),
-        connection_string: db_path.to_str().unwrap().to_string(),
+    let source = Source::Duckdb {
+        path: db_path.to_str().unwrap().to_string(),
     };
 
     let conn_id = 1;
@@ -91,7 +91,7 @@ async fn test_duckdb_sync_and_query() {
     let mut writer = StreamingParquetWriter::new(write_path.clone());
 
     fetcher
-        .fetch_table(&config, None, schema, table, &mut writer)
+        .fetch_table(&source, None, schema, table, &mut writer)
         .await
         .unwrap();
 

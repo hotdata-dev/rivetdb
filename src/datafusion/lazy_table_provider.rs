@@ -10,7 +10,8 @@ use std::any::Any;
 use std::sync::Arc;
 
 use crate::catalog::CatalogManager;
-use crate::datafetch::{ConnectionConfig, DataFetcher};
+use crate::datafetch::DataFetcher;
+use crate::source::Source;
 use crate::storage::StorageManager;
 
 /// A lazy table provider that defers data fetching until scan() is called.
@@ -22,7 +23,7 @@ use crate::storage::StorageManager;
 pub struct LazyTableProvider {
     schema: SchemaRef,
     fetcher: Arc<dyn DataFetcher>,
-    connection_config: Arc<serde_json::Value>,
+    source: Arc<Source>,
     catalog: Arc<dyn CatalogManager>,
     storage: Arc<dyn StorageManager>,
     connection_id: i32,
@@ -35,7 +36,7 @@ impl LazyTableProvider {
     pub fn new(
         schema: SchemaRef,
         fetcher: Arc<dyn DataFetcher>,
-        connection_config: Arc<serde_json::Value>,
+        source: Arc<Source>,
         catalog: Arc<dyn CatalogManager>,
         storage: Arc<dyn StorageManager>,
         connection_id: i32,
@@ -45,7 +46,7 @@ impl LazyTableProvider {
         Self {
             schema,
             fetcher,
-            connection_config,
+            source,
             catalog,
             storage,
             connection_id,
@@ -102,23 +103,6 @@ impl LazyTableProvider {
     async fn fetch_and_cache(&self) -> Result<String, DataFusionError> {
         use crate::datafetch::native::StreamingParquetWriter;
 
-        let source_type = self
-            .connection_config
-            .get("type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("postgres");
-
-        let connection_string = self
-            .connection_config
-            .get("connection_string")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-
-        let config = ConnectionConfig {
-            source_type: source_type.to_string(),
-            connection_string: connection_string.to_string(),
-        };
-
         // Prepare cache write location
         let write_path = self.storage.prepare_cache_write(
             self.connection_id,
@@ -129,10 +113,10 @@ impl LazyTableProvider {
         // Create writer
         let mut writer = StreamingParquetWriter::new(write_path.clone());
 
-        // Fetch the table data into writer
+        // Fetch the table data into writer using the Source directly
         self.fetcher
             .fetch_table(
-                &config,
+                &self.source,
                 None, // catalog
                 &self.schema_name,
                 &self.table_name,

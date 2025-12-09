@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use crate::catalog::CatalogManager;
 use crate::datafetch::{deserialize_arrow_schema, DataFetcher};
+use crate::source::Source;
 use crate::storage::StorageManager;
 
 use super::lazy_table_provider::LazyTableProvider;
@@ -17,7 +18,7 @@ pub struct HotDataSchemaProvider {
     #[allow(dead_code)]
     connection_name: String,
     schema_name: String,
-    connection_config: Arc<serde_json::Value>,
+    source: Arc<Source>,
     catalog: Arc<dyn CatalogManager>,
     inner: Arc<MemorySchemaProvider>,
     storage: Arc<dyn StorageManager>,
@@ -30,7 +31,7 @@ impl HotDataSchemaProvider {
         connection_id: i32,
         connection_name: String,
         schema_name: String,
-        connection_config: serde_json::Value,
+        source: Arc<Source>,
         catalog: Arc<dyn CatalogManager>,
         storage: Arc<dyn StorageManager>,
         fetcher: Arc<dyn DataFetcher>,
@@ -39,7 +40,7 @@ impl HotDataSchemaProvider {
             connection_id,
             connection_name,
             schema_name,
-            connection_config: Arc::new(connection_config),
+            source,
             catalog,
             inner: Arc::new(MemorySchemaProvider::new()),
             storage,
@@ -106,7 +107,7 @@ impl SchemaProvider for HotDataSchemaProvider {
         let provider = Arc::new(LazyTableProvider::new(
             schema,
             self.fetcher.clone(),
-            self.connection_config.clone(),
+            self.source.clone(),
             self.catalog.clone(),
             self.storage.clone(),
             self.connection_id,

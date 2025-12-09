@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use rivetdb::catalog::CatalogManager;
 use rivetdb::datafusion::{HotDataEngine, QueryResponse};
+use rivetdb::source::Source;
 
 #[derive(Parser)]
 #[command(name = "hotdata", about = "HotData Query Engine", version)]
@@ -534,8 +535,11 @@ async fn handle_connect(state: &mut ReplState, line: &str) -> Result<()> {
 
     let config_value = serde_json::Value::Object(config);
 
+    // Deserialize to Source enum
+    let source: Source = serde_json::from_value(config_value)?;
+
     // Connect through the engine
-    state.engine.connect(source_type, name, config_value).await?;
+    state.engine.connect(name, source).await?;
 
     Ok(())
 }
