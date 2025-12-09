@@ -23,7 +23,7 @@ pub enum DataFetchError {
 
     /// Requested driver is not supported or not available
     #[error("unsupported driver: {0}")]
-    UnsupportedDriver(String),
+    UnsupportedDriver(&'static str),
 
     /// Failed to discover tables or metadata
     #[error("discovery failed: {0}")]

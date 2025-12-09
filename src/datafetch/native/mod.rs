@@ -23,10 +23,10 @@ impl NativeFetcher {
 #[async_trait]
 impl DataFetcher for NativeFetcher {
     async fn discover_tables(&self, source: &Source) -> Result<Vec<TableMetadata>, DataFetchError> {
-        match source.source_type() {
-            "duckdb" | "motherduck" => duckdb::discover_tables(source).await,
-            "postgres" => postgres::discover_tables(source).await,
-            other => Err(DataFetchError::UnsupportedDriver(other.to_string())),
+        match source {
+            Source::Duckdb { .. } | Source::Motherduck { .. } => duckdb::discover_tables(source).await,
+            Source::Postgres { .. } => postgres::discover_tables(source).await,
+            Source::Snowflake { .. } => Err(DataFetchError::UnsupportedDriver("Snowflake")),
         }
     }
 
@@ -38,12 +38,12 @@ impl DataFetcher for NativeFetcher {
         table: &str,
         writer: &mut StreamingParquetWriter,
     ) -> Result<(), DataFetchError> {
-        match source.source_type() {
-            "duckdb" | "motherduck" => {
+        match source {
+            Source::Duckdb { .. } | Source::Motherduck { .. } => {
                 duckdb::fetch_table(source, catalog, schema, table, writer).await
             }
-            "postgres" => postgres::fetch_table(source, catalog, schema, table, writer).await,
-            other => Err(DataFetchError::UnsupportedDriver(other.to_string())),
+            Source::Postgres { .. } => postgres::fetch_table(source, catalog, schema, table, writer).await,
+            Source::Snowflake { .. } => Err(DataFetchError::UnsupportedDriver("Snowflake")),
         }
     }
 }
