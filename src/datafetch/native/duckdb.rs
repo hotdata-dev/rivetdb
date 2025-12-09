@@ -110,7 +110,13 @@ fn discover_tables_sync(
     Ok(tables)
 }
 
-/// Fetch table data and write to Parquet
+/// Message sent from blocking task to async writer
+enum FetchMessage {
+    Schema(datafusion::arrow::datatypes::Schema),
+    Batch(datafusion::arrow::record_batch::RecordBatch),
+}
+
+/// Fetch table data and write to Parquet using streaming to avoid OOM on large tables
 pub async fn fetch_table(
     source: &Source,
     _catalog: Option<&str>,
@@ -125,39 +131,59 @@ pub async fn fetch_table(
     let schema = schema.to_string();
     let table = table.to_string();
 
-    // DuckDB is sync, so spawn_blocking
-    let (arrow_schema, batches) =
-        tokio::task::spawn_blocking(move || fetch_table_sync(&connection_string, &schema, &table))
-            .await
-            .map_err(|e| DataFetchError::Query(e.to_string()))??;
+    // Channel to stream batches from blocking task
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<FetchMessage>(4);
 
-    // Initialize writer with schema
+    // Spawn blocking task to fetch data
+    let handle = tokio::task::spawn_blocking(move || {
+        fetch_table_to_channel(&connection_string, &schema, &table, tx)
+    });
+
+    // Receive schema first
+    let arrow_schema = match rx.recv().await {
+        Some(FetchMessage::Schema(s)) => s,
+        Some(FetchMessage::Batch(_)) => {
+            return Err(DataFetchError::Query("Expected schema, got batch".into()))
+        }
+        None => return Err(DataFetchError::Query("Channel closed before schema".into())),
+    };
+
     writer.init(&arrow_schema)?;
 
-    // Write batches (or empty batch for empty tables)
-    if batches.is_empty() {
-        let empty_batch = RecordBatch::new_empty(Arc::new(arrow_schema));
-        writer.write_batch(&empty_batch)?;
-    } else {
-        for batch in batches {
-            writer.write_batch(&batch)?;
+    // Receive and write batches
+    let mut wrote_any = false;
+    while let Some(msg) = rx.recv().await {
+        match msg {
+            FetchMessage::Batch(batch) => {
+                writer.write_batch(&batch)?;
+                wrote_any = true;
+            }
+            FetchMessage::Schema(_) => {
+                return Err(DataFetchError::Query("Unexpected schema message".into()))
+            }
         }
     }
+
+    // Handle empty table
+    if !wrote_any {
+        let empty_batch = RecordBatch::new_empty(Arc::new(arrow_schema));
+        writer.write_batch(&empty_batch)?;
+    }
+
+    // Wait for blocking task to complete and propagate any errors
+    handle
+        .await
+        .map_err(|e| DataFetchError::Query(e.to_string()))??;
 
     Ok(())
 }
 
-fn fetch_table_sync(
+fn fetch_table_to_channel(
     connection_string: &str,
     schema: &str,
     table: &str,
-) -> Result<
-    (
-        datafusion::arrow::datatypes::Schema,
-        Vec<datafusion::arrow::record_batch::RecordBatch>,
-    ),
-    DataFetchError,
-> {
+    tx: tokio::sync::mpsc::Sender<FetchMessage>,
+) -> Result<(), DataFetchError> {
     let conn = Connection::open(connection_string)
         .map_err(|e| DataFetchError::Connection(e.to_string()))?;
 
@@ -175,10 +201,23 @@ fn fetch_table_sync(
         .query_arrow([])
         .map_err(|e| DataFetchError::Query(e.to_string()))?;
 
+    // Send schema first
     let arrow_schema = arrow_result.get_schema();
-    let batches: Vec<_> = arrow_result.collect();
+    if tx
+        .blocking_send(FetchMessage::Schema((*arrow_schema).clone()))
+        .is_err()
+    {
+        return Ok(()); // Receiver dropped
+    }
 
-    Ok(((*arrow_schema).clone(), batches))
+    // Stream batches
+    for batch in arrow_result {
+        if tx.blocking_send(FetchMessage::Batch(batch)).is_err() {
+            break; // Receiver dropped
+        }
+    }
+
+    Ok(())
 }
 
 /// Convert DuckDB type name to Arrow DataType
