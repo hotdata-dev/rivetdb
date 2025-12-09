@@ -6,7 +6,8 @@ use datafusion::arrow::array::{
 };
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
-use sqlx::postgres::{PgColumn, PgConnection};
+use futures::StreamExt;
+use sqlx::postgres::{PgColumn, PgConnection, PgRow};
 use sqlx::{Column, Connection, Row, TypeInfo};
 use std::sync::Arc;
 
@@ -106,7 +107,7 @@ pub async fn discover_tables(source: &Source) -> Result<Vec<TableMetadata>, Data
     Ok(tables)
 }
 
-/// Fetch table data and write to Parquet
+/// Fetch table data and write to Parquet using streaming to avoid OOM on large tables
 pub async fn fetch_table(
     source: &Source,
     _catalog: Option<&str>,
@@ -123,65 +124,91 @@ pub async fn fetch_table(
         table.replace('"', "\"\"")
     );
 
-    // Fetch all rows
-    let rows = sqlx::query(&query).fetch_all(&mut conn).await?;
+    const BATCH_SIZE: usize = 10_000;
 
-    // Extract schema
-    let arrow_schema = if !rows.is_empty() {
-        // Non-empty: extract schema from first row's columns
-        schema_from_columns(rows[0].columns())
-    } else {
-        // Empty table: query information_schema for schema
-        let schema_rows = sqlx::query(
-            r#"
-            SELECT column_name, data_type, is_nullable
-            FROM information_schema.columns
-            WHERE table_schema = $1 AND table_name = $2
-            ORDER BY ordinal_position
-            "#,
-        )
-        .bind(schema)
-        .bind(table)
-        .fetch_all(&mut conn)
-        .await?;
+    // Stream rows instead of loading all into memory
+    let mut stream = sqlx::query(&query).fetch(&mut conn);
 
-        if schema_rows.is_empty() {
-            return Err(DataFetchError::Query(format!(
-                "Table {}.{} has no columns",
-                schema, table
-            )));
+    // Get first row to extract schema
+    let first_row = stream.next().await;
+
+    let arrow_schema = match &first_row {
+        Some(Ok(row)) => schema_from_columns(row.columns()),
+        Some(Err(e)) => return Err(DataFetchError::Query(e.to_string())),
+        None => {
+            // Empty table: query information_schema for schema
+            // Need a new connection since stream borrows conn
+            let mut schema_conn = connect_with_ssl_retry(&source.connection_string()).await?;
+            let schema_rows = sqlx::query(
+                r#"
+                SELECT column_name, data_type, is_nullable
+                FROM information_schema.columns
+                WHERE table_schema = $1 AND table_name = $2
+                ORDER BY ordinal_position
+                "#,
+            )
+            .bind(schema)
+            .bind(table)
+            .fetch_all(&mut schema_conn)
+            .await?;
+
+            if schema_rows.is_empty() {
+                return Err(DataFetchError::Query(format!(
+                    "Table {}.{} has no columns",
+                    schema, table
+                )));
+            }
+
+            let fields: Vec<Field> = schema_rows
+                .iter()
+                .map(|row| {
+                    let col_name: String = row.get(0);
+                    let data_type: String = row.get(1);
+                    let is_nullable: String = row.get(2);
+                    Field::new(
+                        col_name,
+                        pg_type_to_arrow(&data_type),
+                        is_nullable.to_uppercase() == "YES",
+                    )
+                })
+                .collect();
+
+            Schema::new(fields)
         }
-
-        let fields: Vec<Field> = schema_rows
-            .iter()
-            .map(|row| {
-                let col_name: String = row.get(0);
-                let data_type: String = row.get(1);
-                let is_nullable: String = row.get(2);
-                Field::new(
-                    col_name,
-                    pg_type_to_arrow(&data_type),
-                    is_nullable.to_uppercase() == "YES",
-                )
-            })
-            .collect();
-
-        Schema::new(fields)
     };
 
     // Initialize writer with schema
     writer.init(&arrow_schema)?;
 
-    // Write batches
-    if rows.is_empty() {
+    // Handle empty table case
+    if first_row.is_none() {
         let empty_batch = RecordBatch::new_empty(Arc::new(arrow_schema));
         writer.write_batch(&empty_batch)?;
-    } else {
-        const BATCH_SIZE: usize = 10_000;
-        for chunk in rows.chunks(BATCH_SIZE) {
-            let batch = rows_to_batch(chunk, &arrow_schema)?;
+        return Ok(());
+    }
+
+    // Process first row and continue streaming
+    let first_row = first_row.unwrap()?;
+    let mut batch_rows: Vec<PgRow> = Vec::with_capacity(BATCH_SIZE);
+    batch_rows.push(first_row);
+
+    // Stream remaining rows
+    while let Some(row_result) = stream.next().await {
+        let row = row_result?;
+        batch_rows.push(row);
+
+        // Write batch when full
+        if batch_rows.len() >= BATCH_SIZE {
+            let batch = rows_to_batch(&batch_rows, &arrow_schema)?;
             writer.write_batch(&batch)?;
+            batch_rows.clear();
         }
+    }
+
+    // Write any remaining rows
+    if !batch_rows.is_empty() {
+        let batch = rows_to_batch(&batch_rows, &arrow_schema)?;
+        writer.write_batch(&batch)?;
     }
 
     Ok(())
