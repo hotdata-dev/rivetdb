@@ -63,6 +63,8 @@ impl LazyTableProvider {
         parquet_url: &str,
         state: &dyn Session,
         projection: Option<&Vec<usize>>,
+        filters: &[Expr],
+        limit: Option<usize>,
     ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
         use datafusion::datasource::file_format::parquet::ParquetFormat;
         use datafusion::datasource::listing::{
@@ -87,8 +89,8 @@ impl LazyTableProvider {
         let table = ListingTable::try_new(config)
             .map_err(|e| DataFusionError::External(format!("Failed to create ListingTable: {}", e).into()))?;
 
-        // Create the scan execution plan with projection pushdown
-        table.scan(state, projection, &[], None).await
+        // Create the scan execution plan with projection, filter, and limit pushdown
+        table.scan(state, projection, filters, limit).await
     }
 
     /// Fetch the table data and update catalog
@@ -170,8 +172,8 @@ impl TableProvider for LazyTableProvider {
         &self,
         state: &dyn Session,
         projection: Option<&Vec<usize>>,
-        _filters: &[Expr],
-        _limit: Option<usize>,
+        filters: &[Expr],
+        limit: Option<usize>,
     ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
         // Check if table is already cached
         let table_info = self
@@ -196,8 +198,8 @@ impl TableProvider for LazyTableProvider {
             self.fetch_and_cache().await?
         };
 
-        // Load the parquet file and create execution plan with projection pushdown
-        self.load_parquet_exec(&parquet_url, state, projection).await
+        // Load the parquet file and create execution plan with projection, filter, and limit pushdown
+        self.load_parquet_exec(&parquet_url, state, projection, filters, limit).await
     }
 
     fn supports_filters_pushdown(
