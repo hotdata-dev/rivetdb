@@ -252,17 +252,6 @@ impl CatalogManager for PostgresCatalogManager {
         })
     }
 
-    fn update_table_schema(&self, table_id: i32, arrow_schema_json: &str) -> Result<()> {
-        self.block_on(async {
-            sqlx::query("UPDATE tables SET arrow_schema_json = $1 WHERE id = $2")
-                .bind(arrow_schema_json)
-                .bind(table_id)
-                .execute(&self.pool)
-                .await?;
-            Ok(())
-        })
-    }
-
     fn clear_table_cache_metadata(
         &self,
         connection_id: i32,

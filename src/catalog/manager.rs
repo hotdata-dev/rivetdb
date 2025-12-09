@@ -40,9 +40,6 @@ pub trait CatalogManager: Debug + Send + Sync {
     ) -> Result<Option<TableInfo>>;
     fn update_table_sync(&self, table_id: i32, parquet_path: &str, state_path: &str) -> Result<()>;
 
-    /// Update table with Arrow schema (serialized as JSON)
-    fn update_table_schema(&self, table_id: i32, arrow_schema_json: &str) -> Result<()>;
-
     /// Clear table cache metadata (set paths to NULL) without deleting files.
     /// This should be called before re-registering the catalog to avoid file handle issues.
     fn clear_table_cache_metadata(

@@ -329,21 +329,6 @@ impl CatalogManager for DuckdbCatalogManager {
         Ok(())
     }
 
-    fn update_table_schema(&self, table_id: i32, arrow_schema_json: &str) -> Result<()> {
-        if self.readonly {
-            anyhow::bail!("Cannot update table schema in readonly mode");
-        }
-
-        let conn_guard = self.get_connection_guard()?;
-        let conn = conn_guard.as_ref().unwrap(); // Safe: get_connection_guard verified it's Some
-
-        conn.execute(
-            "UPDATE tables SET arrow_schema_json = ? WHERE id = ?",
-            params![arrow_schema_json, table_id],
-        )?;
-        Ok(())
-    }
-
     /// Clear table cache metadata (set paths to NULL) without deleting files.
     /// This should be called before re-registering the catalog to avoid file handle issues.
     fn clear_table_cache_metadata(
