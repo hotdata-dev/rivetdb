@@ -1,4 +1,3 @@
-mod arrow_convert;
 mod duckdb;
 mod parquet_writer;
 mod postgres;
