@@ -27,17 +27,7 @@ fn discover_tables_sync(
     let conn = Connection::open(connection_string)
         .map_err(|e| DataFetchError::Connection(e.to_string()))?;
 
-    // Build query with optional catalog filter
-    let catalog_filter = match catalog {
-        Some(cat) => format!(
-            "AND t.table_catalog = '{}'",
-            cat.replace('\'', "''") // escape single quotes
-        ),
-        None => String::new(),
-    };
-
-    let query = format!(
-        r#"
+    let query = r#"
         SELECT
             t.table_catalog,
             t.table_schema,
@@ -53,18 +43,16 @@ fn discover_tables_sync(
             AND t.table_schema = c.table_schema
             AND t.table_name = c.table_name
         WHERE t.table_schema NOT IN ('information_schema', 'pg_catalog')
-        {}
+          AND ($1 IS NULL OR t.table_catalog = $1)
         ORDER BY t.table_schema, t.table_name, c.ordinal_position
-        "#,
-        catalog_filter
-    );
+        "#;
 
     let mut stmt = conn
-        .prepare(&query)
+        .prepare(query)
         .map_err(|e| DataFetchError::Discovery(e.to_string()))?;
 
     let rows = stmt
-        .query_map([], |row| {
+        .query_map([&catalog], |row| {
             Ok((
                 row.get::<_, Option<String>>(0)?, // catalog
                 row.get::<_, String>(1)?,         // schema
