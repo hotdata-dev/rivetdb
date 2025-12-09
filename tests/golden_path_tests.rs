@@ -1,8 +1,9 @@
 //! Golden path integration tests for RivetDB.
 //!
-//! These tests verify the complete workflow: create connection, discover tables, query data.
-//! Tests cover both DuckDB (local) and PostgreSQL (via testcontainers).
-//! Each source type is tested via both the engine API and the REST API.
+//! Tests verify the complete workflow: create connection, discover tables, query data.
+//! Uses a unified test harness that runs the same assertions against:
+//! - Multiple data sources (DuckDB, PostgreSQL)
+//! - Multiple access methods (Engine API, REST API)
 
 use axum::{
     body::Body,
@@ -18,19 +19,240 @@ use tempfile::TempDir;
 use tower::util::ServiceExt;
 
 // ============================================================================
-// Shared Test Infrastructure
+// Unified Test Abstractions
 // ============================================================================
 
-/// Test context that provides both engine and API access.
-struct TestContext {
+/// Normalized query result that works for both engine and API responses.
+struct QueryResult {
+    row_count: usize,
+    columns: Vec<String>,
+}
+
+impl QueryResult {
+    fn from_engine(response: &rivetdb::datafusion::QueryResponse) -> Self {
+        let batch = response.results.first();
+
+        let (columns, row_count) = match batch {
+            Some(b) => {
+                let cols: Vec<String> = b.schema().fields().iter().map(|f| f.name().clone()).collect();
+                (cols, b.num_rows())
+            }
+            None => (vec![], 0),
+        };
+
+        Self { row_count, columns }
+    }
+
+    fn from_api(json: &serde_json::Value) -> Self {
+        let columns = json["columns"]
+            .as_array()
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+
+        let row_count = json["row_count"].as_u64().unwrap_or(0) as usize;
+
+        Self { row_count, columns }
+    }
+
+    fn assert_row_count(&self, expected: usize) {
+        assert_eq!(self.row_count, expected, "Expected {} rows, got {}", expected, self.row_count);
+    }
+
+    fn assert_columns(&self, expected: &[&str]) {
+        let expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
+        assert_eq!(self.columns, expected, "Column mismatch");
+    }
+}
+
+/// Connection info from list operations.
+struct ConnectionResult {
+    count: usize,
+    names: Vec<String>,
+}
+
+impl ConnectionResult {
+    fn from_engine(connections: &[rivetdb::catalog::ConnectionInfo]) -> Self {
+        Self {
+            count: connections.len(),
+            names: connections.iter().map(|c| c.name.clone()).collect(),
+        }
+    }
+
+    fn from_api(json: &serde_json::Value) -> Self {
+        let arr = json["connections"].as_array();
+        Self {
+            count: arr.map(|a| a.len()).unwrap_or(0),
+            names: arr
+                .map(|a| a.iter().filter_map(|c| c["name"].as_str().map(String::from)).collect())
+                .unwrap_or_default(),
+        }
+    }
+
+    fn assert_has_connection(&self, name: &str) {
+        assert!(self.names.contains(&name.to_string()), "Connection '{}' not found in {:?}", name, self.names);
+    }
+
+    fn assert_count(&self, expected: usize) {
+        assert_eq!(self.count, expected, "Expected {} connections", expected);
+    }
+}
+
+/// Table info from list operations.
+struct TablesResult {
+    tables: Vec<(String, String)>, // (schema, table)
+}
+
+impl TablesResult {
+    fn from_engine(tables: &[rivetdb::catalog::TableInfo]) -> Self {
+        Self {
+            tables: tables.iter().map(|t| (t.schema_name.clone(), t.table_name.clone())).collect(),
+        }
+    }
+
+    fn from_api(json: &serde_json::Value) -> Self {
+        let tables = json["tables"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|t| {
+                        let schema = t["schema"].as_str()?;
+                        let table = t["table"].as_str()?;
+                        Some((schema.to_string(), table.to_string()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self { tables }
+    }
+
+    fn assert_has_table(&self, schema: &str, table: &str) {
+        assert!(
+            self.tables.iter().any(|(s, t)| s == schema && t == table),
+            "Table '{}.{}' not found. Available: {:?}",
+            schema, table, self.tables
+        );
+    }
+
+    fn assert_not_empty(&self) {
+        assert!(!self.tables.is_empty(), "Expected tables but found none");
+    }
+}
+
+/// Trait for test execution - allows same test logic for engine vs API.
+#[async_trait::async_trait]
+trait TestExecutor: Send + Sync {
+    async fn connect(&self, name: &str, source: &Source);
+    async fn list_connections(&self) -> ConnectionResult;
+    async fn list_tables(&self, connection: &str) -> TablesResult;
+    async fn query(&self, sql: &str) -> QueryResult;
+}
+
+/// Engine-based test executor.
+struct EngineExecutor {
     engine: Arc<HotDataEngine>,
+}
+
+#[async_trait::async_trait]
+impl TestExecutor for EngineExecutor {
+    async fn connect(&self, name: &str, source: &Source) {
+        self.engine.connect(name, source.clone()).await.expect("Engine connect failed");
+    }
+
+    async fn list_connections(&self) -> ConnectionResult {
+        ConnectionResult::from_engine(&self.engine.list_connections().unwrap())
+    }
+
+    async fn list_tables(&self, connection: &str) -> TablesResult {
+        TablesResult::from_engine(&self.engine.list_tables(Some(connection)).unwrap())
+    }
+
+    async fn query(&self, sql: &str) -> QueryResult {
+        QueryResult::from_engine(&self.engine.execute_query(sql).await.unwrap())
+    }
+}
+
+/// REST API-based test executor.
+struct ApiExecutor {
     router: Router,
+}
+
+#[async_trait::async_trait]
+impl TestExecutor for ApiExecutor {
+    async fn connect(&self, name: &str, source: &Source) {
+        let (source_type, config) = match source {
+            Source::Duckdb { path } => ("duckdb", json!({ "path": path })),
+            Source::Postgres { host, port, user, password, database } => (
+                "postgres",
+                json!({ "host": host, "port": port, "user": user, "password": password, "database": database }),
+            ),
+            _ => panic!("Unsupported source type"),
+        };
+
+        let response = self.router.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(PATH_CONNECTIONS)
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&json!({
+                        "name": name,
+                        "source_type": source_type,
+                        "config": config,
+                    })).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED, "API connect failed");
+    }
+
+    async fn list_connections(&self) -> ConnectionResult {
+        let response = self.router.clone()
+            .oneshot(Request::builder().method("GET").uri(PATH_CONNECTIONS).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        ConnectionResult::from_api(&serde_json::from_slice(&body).unwrap())
+    }
+
+    async fn list_tables(&self, connection: &str) -> TablesResult {
+        let uri = format!("{}?connection={}", PATH_TABLES, connection);
+        let response = self.router.clone()
+            .oneshot(Request::builder().method("GET").uri(&uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        TablesResult::from_api(&serde_json::from_slice(&body).unwrap())
+    }
+
+    async fn query(&self, sql: &str) -> QueryResult {
+        let response = self.router.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(PATH_QUERY)
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&json!({ "sql": sql })).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "Query failed: {}", sql);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        QueryResult::from_api(&serde_json::from_slice(&body).unwrap())
+    }
+}
+
+/// Test context providing both executors.
+struct TestHarness {
+    engine_executor: EngineExecutor,
+    api_executor: ApiExecutor,
     #[allow(dead_code)]
     temp_dir: TempDir,
 }
 
-impl TestContext {
-    /// Create a new test context with a fresh engine.
+impl TestHarness {
     fn new() -> Self {
         let temp_dir = TempDir::new().unwrap();
         let catalog_path = temp_dir.path().join("catalog.db");
@@ -46,548 +268,270 @@ impl TestContext {
             state_dir.to_str().unwrap(),
             false,
         )
-        .expect("Failed to create test engine");
+        .unwrap();
 
         let app = AppServer::new(engine);
 
         Self {
-            engine: app.engine,
-            router: app.router,
+            engine_executor: EngineExecutor { engine: app.engine },
+            api_executor: ApiExecutor { router: app.router },
             temp_dir,
         }
     }
 
-    /// Connect to a source via the engine directly.
-    async fn connect_engine(&self, name: &str, source: Source) {
-        self.engine
-            .connect(name, source)
-            .await
-            .expect("Failed to connect via engine");
+    fn engine(&self) -> &dyn TestExecutor {
+        &self.engine_executor
     }
 
-    /// Connect to a source via the REST API.
-    async fn connect_api(&self, name: &str, source: &Source) -> serde_json::Value {
-        let (source_type, config) = match source {
-            Source::Duckdb { path } => ("duckdb", json!({ "path": path })),
-            Source::Postgres {
-                host,
-                port,
-                user,
-                password,
-                database,
-            } => (
-                "postgres",
-                json!({
-                    "host": host,
-                    "port": port,
-                    "user": user,
-                    "password": password,
-                    "database": database,
-                }),
-            ),
-            _ => panic!("Unsupported source type for API test"),
-        };
-
-        let response = self
-            .router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(PATH_CONNECTIONS)
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::to_string(&json!({
-                            "name": name,
-                            "source_type": source_type,
-                            "config": config,
-                        }))
-                        .unwrap(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(
-            response.status(),
-            StatusCode::CREATED,
-            "Connection creation should succeed"
-        );
-
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        serde_json::from_slice(&body).unwrap()
-    }
-
-    /// Query via the engine directly.
-    async fn query_engine(&self, sql: &str) -> rivetdb::datafusion::QueryResponse {
-        self.engine
-            .execute_query(sql)
-            .await
-            .expect("Query should succeed")
-    }
-
-    /// Query via the REST API.
-    async fn query_api(&self, sql: &str) -> serde_json::Value {
-        let response = self
-            .router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(PATH_QUERY)
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::to_string(&json!({ "sql": sql })).unwrap(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(
-            response.status(),
-            StatusCode::OK,
-            "Query should succeed: {}",
-            sql
-        );
-
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        serde_json::from_slice(&body).unwrap()
-    }
-
-    /// List connections via the REST API.
-    async fn list_connections_api(&self) -> serde_json::Value {
-        let response = self
-            .router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri(PATH_CONNECTIONS)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        serde_json::from_slice(&body).unwrap()
-    }
-
-    /// List tables via the REST API.
-    async fn list_tables_api(&self, connection: Option<&str>) -> serde_json::Value {
-        let uri = match connection {
-            Some(conn) => format!("{}?connection={}", PATH_TABLES, conn),
-            None => PATH_TABLES.to_string(),
-        };
-
-        let response = self
-            .router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri(&uri)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        serde_json::from_slice(&body).unwrap()
+    fn api(&self) -> &dyn TestExecutor {
+        &self.api_executor
     }
 }
 
 // ============================================================================
-// DuckDB Tests
+// Shared Test Scenarios
+// ============================================================================
+
+/// SQL queries used across all tests.
+mod queries {
+    pub fn select_orders(conn: &str) -> String {
+        format!("SELECT order_id, customer_name, amount FROM {}.sales.orders ORDER BY order_id", conn)
+    }
+
+    pub fn count_paid_orders(conn: &str) -> String {
+        format!("SELECT COUNT(*) as cnt, SUM(amount) as total FROM {}.sales.orders WHERE is_paid = true", conn)
+    }
+
+    pub fn select_all(conn: &str, schema: &str, table: &str) -> String {
+        format!("SELECT * FROM {}.{}.{}", conn, schema, table)
+    }
+}
+
+/// Run the golden path test scenario against any executor and source.
+async fn run_golden_path_test(executor: &dyn TestExecutor, source: &Source, conn_name: &str) {
+    // Connect
+    executor.connect(conn_name, source).await;
+
+    // Verify connection exists
+    let connections = executor.list_connections().await;
+    connections.assert_count(1);
+    connections.assert_has_connection(conn_name);
+
+    // Verify tables discovered
+    let tables = executor.list_tables(conn_name).await;
+    tables.assert_not_empty();
+    tables.assert_has_table("sales", "orders");
+
+    // Query and verify
+    let result = executor.query(&queries::select_orders(conn_name)).await;
+    result.assert_row_count(4);
+    result.assert_columns(&["order_id", "customer_name", "amount"]);
+
+    // Aggregation
+    let agg = executor.query(&queries::count_paid_orders(conn_name)).await;
+    agg.assert_row_count(1);
+}
+
+/// Run multi-schema test scenario.
+async fn run_multi_schema_test(executor: &dyn TestExecutor, source: &Source, conn_name: &str) {
+    executor.connect(conn_name, source).await;
+
+    let tables = executor.list_tables(conn_name).await;
+    tables.assert_has_table("sales", "orders");
+    tables.assert_has_table("inventory", "products");
+
+    let orders = executor.query(&queries::select_all(conn_name, "sales", "orders")).await;
+    orders.assert_row_count(1);
+
+    let products = executor.query(&queries::select_all(conn_name, "inventory", "products")).await;
+    products.assert_row_count(1);
+}
+
+// ============================================================================
+// Data Source Fixtures
+// ============================================================================
+
+mod fixtures {
+    use super::*;
+
+    /// Creates a DuckDB with standard test data (sales.orders with 4 rows).
+    pub fn duckdb_standard() -> (TempDir, Source) {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("source.duckdb");
+        let conn = duckdb::Connection::open(&db_path).unwrap();
+
+        conn.execute("CREATE SCHEMA sales", []).unwrap();
+        conn.execute(
+            "CREATE TABLE sales.orders (order_id INTEGER, customer_name VARCHAR, amount DOUBLE, is_paid BOOLEAN)",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO sales.orders VALUES (1, 'Alice', 100.50, true), (2, 'Bob', 250.75, false), (3, 'Charlie', 75.25, true), (4, 'David', 500.00, true)",
+            [],
+        ).unwrap();
+
+        (temp_dir, Source::Duckdb { path: db_path.to_str().unwrap().to_string() })
+    }
+
+    /// Creates a DuckDB with multiple schemas.
+    pub fn duckdb_multi_schema() -> (TempDir, Source) {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("source.duckdb");
+        let conn = duckdb::Connection::open(&db_path).unwrap();
+
+        conn.execute("CREATE SCHEMA sales", []).unwrap();
+        conn.execute("CREATE SCHEMA inventory", []).unwrap();
+        conn.execute("CREATE TABLE sales.orders (id INTEGER, total DOUBLE)", []).unwrap();
+        conn.execute("CREATE TABLE inventory.products (id INTEGER, name VARCHAR)", []).unwrap();
+        conn.execute("INSERT INTO sales.orders VALUES (1, 99.99)", []).unwrap();
+        conn.execute("INSERT INTO inventory.products VALUES (1, 'Widget')", []).unwrap();
+
+        (temp_dir, Source::Duckdb { path: db_path.to_str().unwrap().to_string() })
+    }
+}
+
+mod postgres_fixtures {
+    use super::*;
+    use testcontainers::{runners::AsyncRunner, ContainerAsync, ImageExt};
+    use testcontainers_modules::postgres::Postgres;
+
+    pub struct PostgresFixture {
+        #[allow(dead_code)]
+        pub container: ContainerAsync<Postgres>,
+        pub source: Source,
+    }
+
+    async fn start_container() -> (ContainerAsync<Postgres>, String) {
+        let container = Postgres::default()
+            .with_tag("15-alpine")
+            .start()
+            .await
+            .expect("Failed to start postgres");
+        let port = container.get_host_port_ipv4(5432).await.unwrap();
+        let conn_str = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+        (container, conn_str)
+    }
+
+    pub async fn standard() -> PostgresFixture {
+        let (container, conn_str) = start_container().await;
+        let pool = sqlx::PgPool::connect(&conn_str).await.unwrap();
+
+        sqlx::query("CREATE SCHEMA sales").execute(&pool).await.unwrap();
+        sqlx::query(
+            "CREATE TABLE sales.orders (order_id INTEGER, customer_name VARCHAR(100), amount DOUBLE PRECISION, is_paid BOOLEAN)"
+        ).execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO sales.orders VALUES (1, 'Alice', 100.50, true), (2, 'Bob', 250.75, false), (3, 'Charlie', 75.25, true), (4, 'David', 500.00, true)"
+        ).execute(&pool).await.unwrap();
+        pool.close().await;
+
+        let port = container.get_host_port_ipv4(5432).await.unwrap();
+        PostgresFixture {
+            container,
+            source: Source::Postgres {
+                host: "localhost".into(),
+                port,
+                user: "postgres".into(),
+                password: "postgres".into(),
+                database: "postgres".into(),
+            },
+        }
+    }
+
+    pub async fn multi_schema() -> PostgresFixture {
+        let (container, conn_str) = start_container().await;
+        let pool = sqlx::PgPool::connect(&conn_str).await.unwrap();
+
+        sqlx::query("CREATE SCHEMA sales").execute(&pool).await.unwrap();
+        sqlx::query("CREATE SCHEMA inventory").execute(&pool).await.unwrap();
+        sqlx::query("CREATE TABLE sales.orders (id INTEGER, total DOUBLE PRECISION)").execute(&pool).await.unwrap();
+        sqlx::query("CREATE TABLE inventory.products (id INTEGER, name VARCHAR(100))").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO sales.orders VALUES (1, 99.99)").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO inventory.products VALUES (1, 'Widget')").execute(&pool).await.unwrap();
+        pool.close().await;
+
+        let port = container.get_host_port_ipv4(5432).await.unwrap();
+        PostgresFixture {
+            container,
+            source: Source::Postgres {
+                host: "localhost".into(),
+                port,
+                user: "postgres".into(),
+                password: "postgres".into(),
+                database: "postgres".into(),
+            },
+        }
+    }
+}
+
+// ============================================================================
+// Tests - DuckDB
 // ============================================================================
 
 mod duckdb_tests {
     use super::*;
 
-    /// Create a DuckDB source with test data.
-    fn create_duckdb_source() -> (TempDir, Source) {
-        let temp_dir = TempDir::new().unwrap();
-        let db_path = temp_dir.path().join("source.duckdb");
-
-        let conn = duckdb::Connection::open(&db_path).unwrap();
-
-        conn.execute("CREATE SCHEMA sales", []).unwrap();
-        conn.execute(
-            "CREATE TABLE sales.orders (
-                order_id INTEGER,
-                customer_name VARCHAR,
-                amount DOUBLE,
-                is_paid BOOLEAN
-            )",
-            [],
-        )
-        .unwrap();
-
-        conn.execute(
-            "INSERT INTO sales.orders VALUES
-                (1, 'Alice', 100.50, true),
-                (2, 'Bob', 250.75, false),
-                (3, 'Charlie', 75.25, true),
-                (4, 'David', 500.00, true)",
-            [],
-        )
-        .unwrap();
-
-        let source = Source::Duckdb {
-            path: db_path.to_str().unwrap().to_string(),
-        };
-
-        (temp_dir, source)
-    }
-
     #[tokio::test]
     async fn test_engine_golden_path() {
-        let (_source_dir, source) = create_duckdb_source();
-        let ctx = TestContext::new();
-
-        // Connect via engine
-        ctx.connect_engine("local_duckdb", source).await;
-
-        // Verify connection
-        let connections = ctx.engine.list_connections().unwrap();
-        assert_eq!(connections.len(), 1);
-        assert_eq!(connections[0].name, "local_duckdb");
-
-        // Verify tables were discovered
-        let tables = ctx.engine.list_tables(Some("local_duckdb")).unwrap();
-        assert!(tables.iter().any(|t| t.table_name == "orders"));
-
-        // Query and verify results
-        let result = ctx
-            .query_engine(
-                "SELECT order_id, customer_name, amount FROM local_duckdb.sales.orders ORDER BY order_id",
-            )
-            .await;
-        assert_eq!(result.results[0].num_rows(), 4);
-        assert_eq!(result.results[0].num_columns(), 3);
-
-        // Aggregation query
-        let agg = ctx
-            .query_engine(
-                "SELECT COUNT(*) as cnt, SUM(amount) as total FROM local_duckdb.sales.orders WHERE is_paid = true",
-            )
-            .await;
-        assert_eq!(agg.results[0].num_rows(), 1);
+        let (_dir, source) = fixtures::duckdb_standard();
+        let harness = TestHarness::new();
+        run_golden_path_test(harness.engine(), &source, "duckdb_conn").await;
     }
 
     #[tokio::test]
     async fn test_api_golden_path() {
-        let (_source_dir, source) = create_duckdb_source();
-        let ctx = TestContext::new();
+        let (_dir, source) = fixtures::duckdb_standard();
+        let harness = TestHarness::new();
+        run_golden_path_test(harness.api(), &source, "duckdb_conn").await;
+    }
 
-        // Connect via API
-        let conn_response = ctx.connect_api("local_duckdb", &source).await;
-        assert_eq!(conn_response["name"], "local_duckdb");
-        assert_eq!(conn_response["source_type"], "duckdb");
-        assert!(conn_response["tables_discovered"].as_i64().unwrap() > 0);
+    #[tokio::test]
+    async fn test_engine_multi_schema() {
+        let (_dir, source) = fixtures::duckdb_multi_schema();
+        let harness = TestHarness::new();
+        run_multi_schema_test(harness.engine(), &source, "duckdb_conn").await;
+    }
 
-        // List connections via API
-        let connections = ctx.list_connections_api().await;
-        assert_eq!(connections["connections"].as_array().unwrap().len(), 1);
-        assert_eq!(connections["connections"][0]["name"], "local_duckdb");
-
-        // List tables via API
-        let tables = ctx.list_tables_api(Some("local_duckdb")).await;
-        let table_list = tables["tables"].as_array().unwrap();
-        assert!(table_list.iter().any(|t| t["table"] == "orders"));
-
-        // Query via API
-        let result = ctx
-            .query_api(
-                "SELECT order_id, customer_name, amount FROM local_duckdb.sales.orders ORDER BY order_id",
-            )
-            .await;
-        assert_eq!(result["row_count"], 4);
-        assert_eq!(result["columns"], json!(["order_id", "customer_name", "amount"]));
-        assert_eq!(result["rows"][0][0], 1);
-        assert_eq!(result["rows"][0][1], "Alice");
-
-        // Aggregation via API
-        let agg = ctx
-            .query_api(
-                "SELECT COUNT(*) as cnt, SUM(amount) as total FROM local_duckdb.sales.orders WHERE is_paid = true",
-            )
-            .await;
-        assert_eq!(agg["row_count"], 1);
-        assert_eq!(agg["rows"][0][0], 3); // 3 paid orders
+    #[tokio::test]
+    async fn test_api_multi_schema() {
+        let (_dir, source) = fixtures::duckdb_multi_schema();
+        let harness = TestHarness::new();
+        run_multi_schema_test(harness.api(), &source, "duckdb_conn").await;
     }
 }
 
 // ============================================================================
-// PostgreSQL Tests (using testcontainers)
+// Tests - PostgreSQL
 // ============================================================================
 
 mod postgres_tests {
     use super::*;
-    use testcontainers::{runners::AsyncRunner, ContainerAsync, ImageExt};
-    use testcontainers_modules::postgres::Postgres;
-
-    /// PostgreSQL test fixture with container and source.
-    struct PostgresFixture {
-        #[allow(dead_code)]
-        container: ContainerAsync<Postgres>,
-        source: Source,
-    }
-
-    impl PostgresFixture {
-        /// Create a Postgres container with test data.
-        async fn new() -> Self {
-            let container = Postgres::default()
-                .with_tag("15-alpine")
-                .start()
-                .await
-                .expect("Failed to start postgres container");
-
-            let host_port = container.get_host_port_ipv4(5432).await.unwrap();
-            let connection_string = format!(
-                "postgres://postgres:postgres@localhost:{}/postgres",
-                host_port
-            );
-
-            // Create test schema and data
-            let pool = sqlx::PgPool::connect(&connection_string)
-                .await
-                .expect("Failed to connect to postgres");
-
-            sqlx::query("CREATE SCHEMA IF NOT EXISTS sales")
-                .execute(&pool)
-                .await
-                .unwrap();
-
-            sqlx::query(
-                "CREATE TABLE IF NOT EXISTS sales.orders (
-                    order_id INTEGER,
-                    customer_name VARCHAR(100),
-                    amount DOUBLE PRECISION,
-                    is_paid BOOLEAN
-                )",
-            )
-            .execute(&pool)
-            .await
-            .unwrap();
-
-            sqlx::query(
-                "INSERT INTO sales.orders (order_id, customer_name, amount, is_paid) VALUES
-                    (1, 'Alice', 100.50, true),
-                    (2, 'Bob', 250.75, false),
-                    (3, 'Charlie', 75.25, true),
-                    (4, 'David', 500.00, true)",
-            )
-            .execute(&pool)
-            .await
-            .unwrap();
-
-            pool.close().await;
-
-            let source = Source::Postgres {
-                host: "localhost".to_string(),
-                port: host_port,
-                user: "postgres".to_string(),
-                password: "postgres".to_string(),
-                database: "postgres".to_string(),
-            };
-
-            Self { container, source }
-        }
-
-        /// Create a Postgres container with multiple schemas.
-        async fn new_multi_schema() -> Self {
-            let container = Postgres::default()
-                .with_tag("15-alpine")
-                .start()
-                .await
-                .expect("Failed to start postgres container");
-
-            let host_port = container.get_host_port_ipv4(5432).await.unwrap();
-            let connection_string = format!(
-                "postgres://postgres:postgres@localhost:{}/postgres",
-                host_port
-            );
-
-            let pool = sqlx::PgPool::connect(&connection_string)
-                .await
-                .expect("Failed to connect to postgres");
-
-            sqlx::query("CREATE SCHEMA IF NOT EXISTS sales")
-                .execute(&pool)
-                .await
-                .unwrap();
-            sqlx::query("CREATE SCHEMA IF NOT EXISTS inventory")
-                .execute(&pool)
-                .await
-                .unwrap();
-
-            sqlx::query("CREATE TABLE sales.orders (id INTEGER, total DOUBLE PRECISION)")
-                .execute(&pool)
-                .await
-                .unwrap();
-            sqlx::query("CREATE TABLE inventory.products (id INTEGER, name VARCHAR(100))")
-                .execute(&pool)
-                .await
-                .unwrap();
-
-            sqlx::query("INSERT INTO sales.orders VALUES (1, 99.99)")
-                .execute(&pool)
-                .await
-                .unwrap();
-            sqlx::query("INSERT INTO inventory.products VALUES (1, 'Widget')")
-                .execute(&pool)
-                .await
-                .unwrap();
-
-            pool.close().await;
-
-            let source = Source::Postgres {
-                host: "localhost".to_string(),
-                port: host_port,
-                user: "postgres".to_string(),
-                password: "postgres".to_string(),
-                database: "postgres".to_string(),
-            };
-
-            Self { container, source }
-        }
-    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_engine_golden_path() {
-        let fixture = PostgresFixture::new().await;
-        let ctx = TestContext::new();
-
-        // Connect via engine
-        ctx.connect_engine("pg_source", fixture.source.clone()).await;
-
-        // Verify connection
-        let connections = ctx.engine.list_connections().unwrap();
-        assert_eq!(connections.len(), 1);
-        assert_eq!(connections[0].name, "pg_source");
-
-        // Verify tables were discovered
-        let tables = ctx.engine.list_tables(Some("pg_source")).unwrap();
-        assert!(
-            tables.iter().any(|t| t.table_name == "orders"),
-            "Should find orders table. Found: {:?}",
-            tables.iter().map(|t| &t.table_name).collect::<Vec<_>>()
-        );
-
-        // Query and verify results
-        let result = ctx
-            .query_engine(
-                "SELECT order_id, customer_name, amount FROM pg_source.sales.orders ORDER BY order_id",
-            )
-            .await;
-        assert_eq!(result.results[0].num_rows(), 4);
-        assert_eq!(result.results[0].num_columns(), 3);
-
-        // Aggregation query
-        let agg = ctx
-            .query_engine(
-                "SELECT COUNT(*) as cnt, SUM(amount) as total FROM pg_source.sales.orders WHERE is_paid = true",
-            )
-            .await;
-        assert_eq!(agg.results[0].num_rows(), 1);
+        let fixture = postgres_fixtures::standard().await;
+        let harness = TestHarness::new();
+        run_golden_path_test(harness.engine(), &fixture.source, "pg_conn").await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_api_golden_path() {
-        let fixture = PostgresFixture::new().await;
-        let ctx = TestContext::new();
-
-        // Connect via API
-        let conn_response = ctx.connect_api("pg_source", &fixture.source).await;
-        assert_eq!(conn_response["name"], "pg_source");
-        assert_eq!(conn_response["source_type"], "postgres");
-        assert!(conn_response["tables_discovered"].as_i64().unwrap() > 0);
-
-        // List connections via API
-        let connections = ctx.list_connections_api().await;
-        assert_eq!(connections["connections"].as_array().unwrap().len(), 1);
-        assert_eq!(connections["connections"][0]["name"], "pg_source");
-
-        // List tables via API
-        let tables = ctx.list_tables_api(Some("pg_source")).await;
-        let table_list = tables["tables"].as_array().unwrap();
-        assert!(
-            table_list.iter().any(|t| t["table"] == "orders"),
-            "Should find orders table. Found: {:?}",
-            table_list
-        );
-
-        // Query via API
-        let result = ctx
-            .query_api(
-                "SELECT order_id, customer_name, amount FROM pg_source.sales.orders ORDER BY order_id",
-            )
-            .await;
-        assert_eq!(result["row_count"], 4);
-        assert_eq!(result["columns"], json!(["order_id", "customer_name", "amount"]));
-        assert_eq!(result["rows"][0][0], 1);
-        assert_eq!(result["rows"][0][1], "Alice");
-
-        // Aggregation via API
-        let agg = ctx
-            .query_api(
-                "SELECT COUNT(*) as cnt, SUM(amount) as total FROM pg_source.sales.orders WHERE is_paid = true",
-            )
-            .await;
-        assert_eq!(agg["row_count"], 1);
-        assert_eq!(agg["rows"][0][0], 3); // 3 paid orders
+        let fixture = postgres_fixtures::standard().await;
+        let harness = TestHarness::new();
+        run_golden_path_test(harness.api(), &fixture.source, "pg_conn").await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_multiple_schemas() {
-        let fixture = PostgresFixture::new_multi_schema().await;
-        let ctx = TestContext::new();
+    async fn test_engine_multi_schema() {
+        let fixture = postgres_fixtures::multi_schema().await;
+        let harness = TestHarness::new();
+        run_multi_schema_test(harness.engine(), &fixture.source, "pg_conn").await;
+    }
 
-        // Connect via engine
-        ctx.connect_engine("pg", fixture.source.clone()).await;
-
-        // Verify both schemas discovered (via engine)
-        let tables = ctx.engine.list_tables(Some("pg")).unwrap();
-        let table_names: Vec<&str> = tables.iter().map(|t| t.table_name.as_str()).collect();
-        assert!(table_names.contains(&"orders"));
-        assert!(table_names.contains(&"products"));
-
-        // Verify via API
-        let tables_api = ctx.list_tables_api(Some("pg")).await;
-        let table_list = tables_api["tables"].as_array().unwrap();
-        assert!(table_list.iter().any(|t| t["table"] == "orders"));
-        assert!(table_list.iter().any(|t| t["table"] == "products"));
-
-        // Query from both schemas via engine
-        let orders = ctx.query_engine("SELECT * FROM pg.sales.orders").await;
-        assert_eq!(orders.results[0].num_rows(), 1);
-
-        let products = ctx
-            .query_engine("SELECT * FROM pg.inventory.products")
-            .await;
-        assert_eq!(products.results[0].num_rows(), 1);
-
-        // Query from both schemas via API
-        let orders_api = ctx.query_api("SELECT * FROM pg.sales.orders").await;
-        assert_eq!(orders_api["row_count"], 1);
-
-        let products_api = ctx.query_api("SELECT * FROM pg.inventory.products").await;
-        assert_eq!(products_api["row_count"], 1);
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_api_multi_schema() {
+        let fixture = postgres_fixtures::multi_schema().await;
+        let harness = TestHarness::new();
+        run_multi_schema_test(harness.api(), &fixture.source, "pg_conn").await;
     }
 }
