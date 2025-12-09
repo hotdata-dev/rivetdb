@@ -1,5 +1,7 @@
 use super::schema_provider::HotDataSchemaProvider;
 use crate::catalog::CatalogManager;
+use crate::datafetch::{DataFetcher, NativeFetcher};
+use crate::source::Source;
 use crate::storage::StorageManager;
 use async_trait::async_trait;
 use datafusion::catalog::{CatalogProvider, SchemaProvider};
@@ -12,27 +14,29 @@ use std::sync::{Arc, RwLock};
 pub struct HotDataCatalogProvider {
     connection_id: i32,
     connection_name: String,
-    connection_config: Arc<serde_json::Value>,
+    source: Arc<Source>,
     catalog: Arc<dyn CatalogManager>,
     schemas: Arc<RwLock<HashMap<String, Arc<dyn SchemaProvider>>>>,
     storage: Arc<dyn StorageManager>,
+    fetcher: Arc<dyn DataFetcher>,
 }
 
 impl HotDataCatalogProvider {
     pub fn new(
         connection_id: i32,
         connection_name: String,
-        connection_config: serde_json::Value,
+        source: Arc<Source>,
         catalog: Arc<dyn CatalogManager>,
         storage: Arc<dyn StorageManager>,
     ) -> Self {
         Self {
             connection_id,
             connection_name,
-            connection_config: Arc::new(connection_config),
+            source,
             catalog,
             schemas: Arc::new(RwLock::new(HashMap::new())),
             storage,
+            fetcher: Arc::new(NativeFetcher::new()),
         }
     }
 
@@ -59,9 +63,10 @@ impl HotDataCatalogProvider {
             self.connection_id,
             self.connection_name.clone(),
             schema_name.to_string(),
-            (*self.connection_config).clone(),
+            self.source.clone(),
             self.catalog.clone(),
             self.storage.clone(),
+            self.fetcher.clone(),
         )) as Arc<dyn SchemaProvider>;
 
         schemas.insert(schema_name.to_string(), schema_provider.clone());

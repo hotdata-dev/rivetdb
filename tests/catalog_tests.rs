@@ -1,6 +1,6 @@
-use tempfile::tempdir;
 use rivetdb::catalog::CatalogManager;
 use rivetdb::catalog::DuckdbCatalogManager;
+use tempfile::tempdir;
 
 #[test]
 fn test_catalog_initialization() {
@@ -43,7 +43,7 @@ fn test_clear_connection_cache_metadata() {
     let conn_id = catalog
         .add_connection("test_db", "postgres", config)
         .unwrap();
-    let table_id = catalog.add_table(conn_id, "public", "users").unwrap();
+    let table_id = catalog.add_table(conn_id, "public", "users", "").unwrap();
 
     // Update table to have paths
     catalog
@@ -86,7 +86,7 @@ fn test_delete_connection() {
     let conn_id = catalog
         .add_connection("test_db", "postgres", config)
         .unwrap();
-    catalog.add_table(conn_id, "public", "users").unwrap();
+    catalog.add_table(conn_id, "public", "users", "").unwrap();
 
     // Verify connection and table exist
     assert!(catalog.get_connection("test_db").unwrap().is_some());
@@ -204,16 +204,22 @@ fn test_list_tables_multiple_connections() {
     let conn1_id = catalog
         .add_connection("neon_east", "postgres", config1)
         .unwrap();
-    catalog.add_table(conn1_id, "public", "cities").unwrap();
-    catalog.add_table(conn1_id, "public", "locations").unwrap();
-    catalog.add_table(conn1_id, "public", "table_1").unwrap();
+    catalog.add_table(conn1_id, "public", "cities", "").unwrap();
+    catalog
+        .add_table(conn1_id, "public", "locations", "")
+        .unwrap();
+    catalog
+        .add_table(conn1_id, "public", "table_1", "")
+        .unwrap();
 
     // Add second connection with tables
     let config2 = r#"{"host": "localhost", "port": 5433, "database": "db2"}"#;
     let conn2_id = catalog
         .add_connection("connection2", "postgres", config2)
         .unwrap();
-    catalog.add_table(conn2_id, "public", "table_1").unwrap();
+    catalog
+        .add_table(conn2_id, "public", "table_1", "")
+        .unwrap();
 
     // List all tables (no filter)
     let all_tables = catalog.list_tables(None).unwrap();
@@ -267,10 +273,10 @@ fn test_list_tables_with_cached_status() {
         .add_connection("test_db", "postgres", config)
         .unwrap();
     let table1_id = catalog
-        .add_table(conn_id, "public", "cached_table")
+        .add_table(conn_id, "public", "cached_table", "")
         .unwrap();
     let _table2_id = catalog
-        .add_table(conn_id, "public", "not_cached_table")
+        .add_table(conn_id, "public", "not_cached_table", "")
         .unwrap();
 
     // Mark one table as cached
@@ -330,8 +336,8 @@ fn test_clear_table_cache_metadata() {
     let conn_id = catalog
         .add_connection("test_db", "postgres", config)
         .unwrap();
-    let table1_id = catalog.add_table(conn_id, "public", "users").unwrap();
-    let table2_id = catalog.add_table(conn_id, "public", "orders").unwrap();
+    let table1_id = catalog.add_table(conn_id, "public", "users", "").unwrap();
+    let table2_id = catalog.add_table(conn_id, "public", "orders", "").unwrap();
 
     // Update both tables to have paths
     catalog
@@ -414,7 +420,7 @@ fn test_clear_table_without_cache() {
     let conn_id = catalog
         .add_connection("test_db", "postgres", config)
         .unwrap();
-    let _table_id = catalog.add_table(conn_id, "public", "users").unwrap();
+    let _table_id = catalog.add_table(conn_id, "public", "users", "").unwrap();
 
     // Verify table exists but has no cache
     let table_before = catalog

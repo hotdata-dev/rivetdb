@@ -1,11 +1,14 @@
-use anyhow::Result;
 use async_trait::async_trait;
 use datafusion::catalog::{MemorySchemaProvider, SchemaProvider};
 use datafusion::datasource::TableProvider;
 use std::sync::Arc;
 
 use crate::catalog::CatalogManager;
+use crate::datafetch::{deserialize_arrow_schema, DataFetcher};
+use crate::source::Source;
 use crate::storage::StorageManager;
+
+use super::lazy_table_provider::LazyTableProvider;
 
 /// A schema provider that syncs tables on-demand from remote sources.
 /// Wraps MemorySchemaProvider for caching already-loaded tables.
@@ -15,10 +18,11 @@ pub struct HotDataSchemaProvider {
     #[allow(dead_code)]
     connection_name: String,
     schema_name: String,
-    _connection_config: Arc<serde_json::Value>,
+    source: Arc<Source>,
     catalog: Arc<dyn CatalogManager>,
     inner: Arc<MemorySchemaProvider>,
     storage: Arc<dyn StorageManager>,
+    fetcher: Arc<dyn DataFetcher>,
 }
 
 impl HotDataSchemaProvider {
@@ -27,63 +31,21 @@ impl HotDataSchemaProvider {
         connection_id: i32,
         connection_name: String,
         schema_name: String,
-        connection_config: serde_json::Value,
+        source: Arc<Source>,
         catalog: Arc<dyn CatalogManager>,
         storage: Arc<dyn StorageManager>,
+        fetcher: Arc<dyn DataFetcher>,
     ) -> Self {
         Self {
             connection_id,
             connection_name,
             schema_name,
-            _connection_config: Arc::new(connection_config),
+            source,
             catalog,
             inner: Arc::new(MemorySchemaProvider::new()),
             storage,
+            fetcher,
         }
-    }
-
-    /// Load a parquet file and return a TableProvider, filtering out dlt metadata columns.
-    /// The parquet_url can be a file:// or s3:// URL.
-    async fn load_parquet(&self, parquet_url: &str) -> Result<Arc<dyn TableProvider>> {
-        use datafusion::arrow::datatypes::Schema;
-        use datafusion::datasource::file_format::parquet::ParquetFormat;
-        use datafusion::datasource::listing::{
-            ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
-        };
-        use datafusion::prelude::SessionContext;
-
-        // Parse the URL directly - DataFusion handles both file:// and s3:// if object store is registered
-        let table_path = ListingTableUrl::parse(parquet_url)?;
-
-        let file_format = ParquetFormat::default();
-        let listing_options = ListingOptions::new(Arc::new(file_format));
-
-        // Need a temporary context to infer schema
-        let temp_ctx = SessionContext::new();
-        // Register storage with the temp context for S3 support
-        self.storage.register_with_datafusion(&temp_ctx)?;
-
-        let resolved_schema = listing_options
-            .infer_schema(&temp_ctx.state(), &table_path)
-            .await?;
-
-        // Filter out _dlt metadata columns
-        const DLT_COLUMNS: &[&str] = &["_dlt_id", "_dlt_load_id"];
-        let filtered_fields: Vec<_> = resolved_schema
-            .fields()
-            .iter()
-            .filter(|field| !DLT_COLUMNS.contains(&field.name().as_str()))
-            .cloned()
-            .collect();
-        let filtered_schema = Arc::new(Schema::new(filtered_fields));
-
-        let config = ListingTableConfig::new(table_path)
-            .with_listing_options(listing_options)
-            .with_schema(filtered_schema);
-
-        let table = ListingTable::try_new(config)?;
-
-        Ok(Arc::new(table) as Arc<dyn TableProvider>)
     }
 }
 
@@ -114,7 +76,7 @@ impl SchemaProvider for HotDataSchemaProvider {
             return Ok(Some(table));
         }
 
-        // Second check: is it in the DuckDB catalog?
+        // Get table info from catalog
         let table_info = match self
             .catalog
             .get_table(self.connection_id, &self.schema_name, name)
@@ -128,29 +90,30 @@ impl SchemaProvider for HotDataSchemaProvider {
             }
         };
 
-        // Third: sync if needed, then load
-        let parquet_url = if let Some(path) = table_info.parquet_path {
-            // Already synced, just load it
-            // Handle both URL and path formats for backward compatibility
-            if path.starts_with("file://") || path.starts_with("s3://") {
-                path
-            } else {
-                format!("file://{}", path)
-            }
-        } else {
-            // Need to sync first
-            todo!("need to implement sync!")
-        };
+        // Deserialize the Arrow schema from catalog
+        let arrow_schema_json = table_info.arrow_schema_json.ok_or_else(|| {
+            datafusion::common::DataFusionError::External(
+                format!("Table {} has no arrow_schema_json in catalog", name).into(),
+            )
+        })?;
 
-        // Load the parquet file
-        let provider = match self.load_parquet(&parquet_url).await {
-            Ok(p) => p,
-            Err(e) => {
-                return Err(datafusion::common::DataFusionError::External(
-                    format!("Failed to load parquet: {}", e).into(),
-                ))
-            }
-        };
+        let schema = deserialize_arrow_schema(&arrow_schema_json).map_err(|e| {
+            datafusion::common::DataFusionError::External(
+                format!("Failed to deserialize arrow schema: {}", e).into(),
+            )
+        })?;
+
+        // Create LazyTableProvider
+        let provider = Arc::new(LazyTableProvider::new(
+            schema,
+            self.fetcher.clone(),
+            self.source.clone(),
+            self.catalog.clone(),
+            self.storage.clone(),
+            self.connection_id,
+            self.schema_name.clone(),
+            name.to_string(),
+        )) as Arc<dyn TableProvider>;
 
         // Cache it in memory for future queries
         self.inner

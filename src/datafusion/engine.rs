@@ -1,5 +1,7 @@
 use super::catalog_provider::HotDataCatalogProvider;
 use crate::catalog::{CatalogManager, ConnectionInfo, DuckdbCatalogManager, TableInfo};
+use crate::datafetch::DataFetcher;
+use crate::source::Source;
 use crate::storage::{FilesystemStorage, StorageManager};
 use anyhow::Result;
 use datafusion::arrow::record_batch::RecordBatch;
@@ -9,6 +11,7 @@ use log::{info, warn};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tracing::error;
 
 pub struct QueryResponse {
     pub results: Vec<RecordBatch>,
@@ -116,12 +119,12 @@ impl HotDataEngine {
         let connections = self.catalog.list_connections()?;
 
         for conn in connections {
-            let config: serde_json::Value = serde_json::from_str(&conn.config_json)?;
+            let source: Source = serde_json::from_str(&conn.config_json)?;
 
             let catalog_provider = Arc::new(HotDataCatalogProvider::new(
                 conn.id,
                 conn.name.clone(),
-                config,
+                Arc::new(source),
                 self.catalog.clone(),
                 self.storage.clone(),
             )) as Arc<dyn CatalogProvider>;
@@ -133,38 +136,52 @@ impl HotDataEngine {
     }
 
     /// Connect to a new external data source and register it as a catalog.
-    pub fn connect(&self, source_type: &str, _name: &str, _config: serde_json::Value) -> Result<()> {
-
-        // Validate source type - must match one of the supported types
-        if !["postgres", "snowflake", "motherduck"].contains(&source_type) {
-            anyhow::bail!(
-                "Unsupported source type '{}'. Supported types: postgres, snowflake, motherduck",
-                source_type
-            );
-        }
-
-        // Inject the type field into config for serde tagged enum parsing
-        // The API sends source_type separately, but Source enum needs it in the JSON
-        // let config_with_type = {
-        //     let mut obj = match config {
-        //         serde_json::Value::Object(m) => m,
-        //         _ => anyhow::bail!("Configuration must be a JSON object"),
-        //     };
-        //     obj.insert(
-        //         "type".to_string(),
-        //         serde_json::Value::String(source_type.to_string()),
-        //     );
-        //     serde_json::Value::Object(obj)
-        // };
-
-        // // Parse config into Source enum 
-        // let source: crate::Source = serde_json::from_value(config_with_type)
-        //     .map_err(|e| anyhow::anyhow!("Invalid configuration for {}: {}", source_type, e))?;
-
+    pub async fn connect(&self, name: &str, source: Source) -> Result<()> {
+        let source_type = source.source_type();
 
         // Discover tables
         info!("Discovering tables for {} source...", source_type);
-        todo!("Implement table discovery");
+        let fetcher = crate::datafetch::NativeFetcher::new();
+        let tables = fetcher
+            .discover_tables(&source)
+            .await
+            .map_err(|e| anyhow::anyhow!("Discovery failed: {}", e))?;
+
+        info!("Discovered {} tables", tables.len());
+
+        // Store config as JSON (includes "type" from serde tag)
+        let config_json = serde_json::to_string(&source)?;
+        let conn_id = self
+            .catalog
+            .add_connection(name, source_type, &config_json)?;
+
+        // Add discovered tables to catalog with schema in one call
+        for table in &tables {
+            let schema = table.to_arrow_schema();
+            let schema_json = serde_json::to_string(schema.as_ref())
+                .map_err(|e| anyhow::anyhow!("Failed to serialize schema: {}", e))?;
+            self.catalog
+                .add_table(conn_id, &table.schema_name, &table.table_name, &schema_json)?;
+        }
+
+        // Register with DataFusion
+        let catalog_provider = Arc::new(HotDataCatalogProvider::new(
+            conn_id,
+            name.to_string(),
+            Arc::new(source),
+            self.catalog.clone(),
+            self.storage.clone(),
+        )) as Arc<dyn CatalogProvider>;
+
+        self.df_ctx.register_catalog(name, catalog_provider);
+
+        info!(
+            "Connection '{}' registered with {} tables",
+            name,
+            tables.len()
+        );
+
+        Ok(())
     }
 
     /// Get a cloned catalog manager that shares the same underlying connection.
@@ -193,9 +210,18 @@ impl HotDataEngine {
 
     /// Execute a SQL query and return the results.
     pub async fn execute_query(&self, sql: &str) -> Result<QueryResponse> {
+        info!("Executing query: {}", sql);
         let start = Instant::now();
-        let df = self.df_ctx.sql(sql).await?;
-        let results = df.collect().await?;
+        let df = self.df_ctx.sql(sql).await.map_err(|e| {
+            error!("Error executing query: {}", e);
+            e
+        })?;
+        let results = df.collect().await.map_err(|e| {
+            error!("Error getting query result: {}", e);
+            e
+        })?;
+        info!("Execution completed in {:?}", start.elapsed());
+        info!("Results available");
 
         Ok(QueryResponse {
             execution_time: start.elapsed(),
@@ -216,12 +242,12 @@ impl HotDataEngine {
 
         // Step 2: Re-register the connection with fresh state
         // This causes DataFusion to drop any open file handles to the cached files
-        let config: serde_json::Value = serde_json::from_str(&conn.config_json)?;
+        let source: Source = serde_json::from_str(&conn.config_json)?;
 
         let catalog_provider = Arc::new(HotDataCatalogProvider::new(
             conn.id,
             conn.name.clone(),
-            config,
+            Arc::new(source),
             self.catalog.clone(),
             self.storage.clone(),
         )) as Arc<dyn CatalogProvider>;
@@ -256,12 +282,12 @@ impl HotDataEngine {
 
         // Step 2: Re-register the connection with fresh state
         // This causes DataFusion to drop any open file handles to the cached files
-        let config: serde_json::Value = serde_json::from_str(&conn.config_json)?;
+        let source: Source = serde_json::from_str(&conn.config_json)?;
 
         let catalog_provider = Arc::new(HotDataCatalogProvider::new(
             conn.id,
             conn.name.clone(),
-            config,
+            Arc::new(source),
             self.catalog.clone(),
             self.storage.clone(),
         )) as Arc<dyn CatalogProvider>;

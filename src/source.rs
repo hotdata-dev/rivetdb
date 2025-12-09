@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use urlencoding::encode;
 
 /// Represents a data source connection with typed configuration.
 /// The `type` field is used as the JSON discriminator via serde's tag attribute.
@@ -25,15 +26,72 @@ pub enum Source {
         token: String,
         database: String,
     },
+    Duckdb {
+        path: String,
+    },
 }
 
 impl Source {
-    /// Returns the source type as a string (e.g., "postgres", "snowflake", "motherduck")
+    /// Returns the source type as a string (e.g., "postgres", "snowflake", "motherduck", "duckdb")
     pub fn source_type(&self) -> &'static str {
         match self {
             Source::Postgres { .. } => "postgres",
             Source::Snowflake { .. } => "snowflake",
             Source::Motherduck { .. } => "motherduck",
+            Source::Duckdb { .. } => "duckdb",
+        }
+    }
+
+    /// Returns the catalog name for this source, if applicable.
+    /// For Motherduck, this is the database name used to filter table discovery.
+    pub fn catalog(&self) -> Option<&str> {
+        match self {
+            Source::Motherduck { database, .. } => Some(database.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Builds the connection string for this source.
+    /// User-provided values are URL-encoded to prevent connection string injection.
+    pub fn connection_string(&self) -> String {
+        match self {
+            Source::Postgres {
+                host,
+                port,
+                user,
+                password,
+                database,
+            } => {
+                format!(
+                    "postgresql://{}:{}@{}:{}/{}",
+                    encode(user),
+                    encode(password),
+                    encode(host),
+                    port,
+                    encode(database)
+                )
+            }
+            Source::Snowflake {
+                account,
+                user,
+                password,
+                warehouse,
+                database,
+                ..
+            } => {
+                format!(
+                    "{}:{}@{}/{}/{}",
+                    encode(user),
+                    encode(password),
+                    encode(account),
+                    encode(database),
+                    encode(warehouse)
+                )
+            }
+            Source::Motherduck { token, database } => {
+                format!("md:{}?motherduck_token={}", encode(database), encode(token))
+            }
+            Source::Duckdb { path } => path.clone(),
         }
     }
 }
@@ -107,6 +165,39 @@ mod tests {
 
         let parsed: Source = serde_json::from_str(&json).unwrap();
         assert_eq!(source, parsed);
+    }
+
+    #[test]
+    fn test_catalog_method() {
+        let motherduck = Source::Motherduck {
+            token: "t".to_string(),
+            database: "my_database".to_string(),
+        };
+        assert_eq!(motherduck.catalog(), Some("my_database"));
+
+        let duckdb = Source::Duckdb {
+            path: "/path/to/db".to_string(),
+        };
+        assert_eq!(duckdb.catalog(), None);
+
+        let postgres = Source::Postgres {
+            host: "localhost".to_string(),
+            port: 5432,
+            user: "u".to_string(),
+            password: "p".to_string(),
+            database: "d".to_string(),
+        };
+        assert_eq!(postgres.catalog(), None);
+
+        let snowflake = Source::Snowflake {
+            account: "a".to_string(),
+            user: "u".to_string(),
+            password: "p".to_string(),
+            warehouse: "w".to_string(),
+            database: "d".to_string(),
+            role: None,
+        };
+        assert_eq!(snowflake.catalog(), None);
     }
 
     #[test]

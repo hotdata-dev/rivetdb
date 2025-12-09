@@ -1,5 +1,8 @@
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
+use rivetdb::catalog::CatalogManager;
+use rivetdb::datafusion::{HotDataEngine, QueryResponse};
+use rivetdb::source::Source;
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
 use rustyline::highlight::Highlighter;
@@ -9,8 +12,6 @@ use rustyline::{Context, Editor, Helper};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use rivetdb::catalog::CatalogManager;
-use rivetdb::datafusion::{HotDataEngine, QueryResponse};
 
 #[derive(Parser)]
 #[command(name = "hotdata", about = "HotData Query Engine", version)]
@@ -405,7 +406,7 @@ async fn handle_command(state: &mut ReplState, line: &str) -> Result<()> {
             print_help();
         }
         _ if line.starts_with("connect ") => {
-            handle_connect(state, line)?;
+            handle_connect(state, line).await?;
         }
         "list-connections" => {
             handle_list_connections(state)?;
@@ -462,7 +463,7 @@ fn print_duration_sec(d: Duration) {
     println!("execution time {}", time);
 }
 
-fn handle_connect(state: &mut ReplState, line: &str) -> Result<()> {
+async fn handle_connect(state: &mut ReplState, line: &str) -> Result<()> {
     // Parse: connect <type> <name> <key=value> ...
     let parts: Vec<&str> = line.split_whitespace().collect();
 
@@ -534,8 +535,11 @@ fn handle_connect(state: &mut ReplState, line: &str) -> Result<()> {
 
     let config_value = serde_json::Value::Object(config);
 
+    // Deserialize to Source enum
+    let source: Source = serde_json::from_value(config_value)?;
+
     // Connect through the engine
-    state.engine.connect(source_type, name, config_value)?;
+    state.engine.connect(name, source).await?;
 
     Ok(())
 }

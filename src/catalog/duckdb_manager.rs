@@ -123,6 +123,15 @@ impl DuckdbCatalogManager {
             conn.execute("INSERT INTO schema_migrations (version) VALUES (1)", [])?;
         }
 
+        // Migration 2: Add arrow_schema_json column to tables
+        if current_version < 2 {
+            conn.execute(
+                "ALTER TABLE tables ADD COLUMN IF NOT EXISTS arrow_schema_json TEXT",
+                [],
+            )?;
+            conn.execute("INSERT INTO schema_migrations (version) VALUES (2)", [])?;
+        }
+
         Ok(())
     }
 
@@ -135,6 +144,7 @@ impl DuckdbCatalogManager {
             parquet_path: row.get(4)?,
             state_path: row.get(5)?,
             last_sync: row.get(6)?,
+            arrow_schema_json: row.get(7)?,
         })
     }
 }
@@ -221,7 +231,13 @@ impl CatalogManager for DuckdbCatalogManager {
         }
     }
 
-    fn add_table(&self, connection_id: i32, schema_name: &str, table_name: &str) -> Result<i32> {
+    fn add_table(
+        &self,
+        connection_id: i32,
+        schema_name: &str,
+        table_name: &str,
+        arrow_schema_json: &str,
+    ) -> Result<i32> {
         if self.readonly {
             anyhow::bail!("Cannot add table in readonly mode");
         }
@@ -229,10 +245,11 @@ impl CatalogManager for DuckdbCatalogManager {
         let conn_guard = self.get_connection_guard()?;
         let conn = conn_guard.as_ref().unwrap(); // Safe: get_connection_guard verified it's Some
 
-        // add table to catalog. if we already know about the table (we're reimporting connection), ignore it
+        // Insert or update table with schema
         conn.execute(
-            "INSERT INTO tables (connection_id, schema_name, table_name) VALUES (?, ?, ?) ON CONFLICT DO NOTHING",
-            params![connection_id, schema_name, table_name],
+            "INSERT INTO tables (connection_id, schema_name, table_name, arrow_schema_json) VALUES (?, ?, ?, ?)
+             ON CONFLICT (connection_id, schema_name, table_name) DO UPDATE SET arrow_schema_json = excluded.arrow_schema_json",
+            params![connection_id, schema_name, table_name, arrow_schema_json],
         )?;
 
         let id: i32 = conn.query_row(
@@ -253,7 +270,7 @@ impl CatalogManager for DuckdbCatalogManager {
         if let Some(conn_id) = connection_id {
             let mut stmt = conn.prepare(
                 "SELECT id, connection_id, schema_name, table_name, parquet_path, state_path, \
-                 CAST(last_sync AS VARCHAR) as last_sync \
+                 CAST(last_sync AS VARCHAR) as last_sync, arrow_schema_json \
                  FROM tables WHERE connection_id = ? ORDER BY schema_name, table_name",
             )?;
             let rows = stmt.query_map(params![conn_id], DuckdbCatalogManager::table_mapper)?;
@@ -264,7 +281,7 @@ impl CatalogManager for DuckdbCatalogManager {
         } else {
             let mut stmt = conn.prepare(
                 "SELECT id, connection_id, schema_name, table_name, parquet_path, state_path, \
-                 CAST(last_sync AS VARCHAR) as last_sync \
+                 CAST(last_sync AS VARCHAR) as last_sync, arrow_schema_json \
                  FROM tables ORDER BY schema_name, table_name",
             )?;
             let rows = stmt.query_map([], DuckdbCatalogManager::table_mapper)?;
@@ -288,7 +305,7 @@ impl CatalogManager for DuckdbCatalogManager {
 
         let mut stmt = conn.prepare(
             "SELECT id, connection_id, schema_name, table_name, parquet_path, state_path, \
-             CAST(last_sync AS VARCHAR) as last_sync \
+             CAST(last_sync AS VARCHAR) as last_sync, arrow_schema_json \
              FROM tables WHERE connection_id = ? AND schema_name = ? AND table_name = ?",
         )?;
 

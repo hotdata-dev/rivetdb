@@ -19,6 +19,7 @@ pub struct TableInfo {
     pub parquet_path: Option<String>,
     pub state_path: Option<String>,
     pub last_sync: Option<String>,
+    pub arrow_schema_json: Option<String>,
 }
 
 pub trait CatalogManager: Debug + Send + Sync {
@@ -29,7 +30,13 @@ pub trait CatalogManager: Debug + Send + Sync {
     fn list_connections(&self) -> Result<Vec<ConnectionInfo>>;
     fn add_connection(&self, name: &str, source_type: &str, config_json: &str) -> Result<i32>;
     fn get_connection(&self, name: &str) -> Result<Option<ConnectionInfo>>;
-    fn add_table(&self, connection_id: i32, schema_name: &str, table_name: &str) -> Result<i32>;
+    fn add_table(
+        &self,
+        connection_id: i32,
+        schema_name: &str,
+        table_name: &str,
+        arrow_schema_json: &str,
+    ) -> Result<i32>;
     fn list_tables(&self, connection_id: Option<i32>) -> Result<Vec<TableInfo>>;
     fn get_table(
         &self,

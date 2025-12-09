@@ -1,8 +1,3 @@
-use axum::{extract::Query as QueryParams, extract::State, http::StatusCode, Json};
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Instant;
-
 use crate::datafusion::HotDataEngine;
 use crate::http::error::ApiError;
 use crate::http::models::{
@@ -10,6 +5,12 @@ use crate::http::models::{
     QueryRequest, QueryResponse, TableInfo, TablesResponse,
 };
 use crate::http::serialization::{encode_value_at, make_array_encoder};
+use crate::source::Source;
+use axum::{extract::Query as QueryParams, extract::State, http::StatusCode, Json};
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Instant;
+use tracing::error;
 
 /// Handler for POST /query
 pub async fn query_handler(
@@ -160,25 +161,40 @@ pub async fn create_connection_handler(
         )));
     }
 
-    // Attempt to connect (discovers tables and registers catalog)
-    // todo: we should do the discover tables work async
-    engine
-        .connect(&request.source_type, &request.name, request.config)
-        .map_err(|e| {
-            // Extract root cause message only - don't expose full stack trace to clients
-            let root_cause = e.root_cause().to_string();
-            let msg = root_cause.lines().next().unwrap_or("Unknown error");
+    // Merge source_type into config as "type" for Source enum deserialization
+    let config_with_type = {
+        let mut obj = match request.config {
+            serde_json::Value::Object(m) => m,
+            _ => return Err(ApiError::bad_request("Configuration must be a JSON object")),
+        };
+        obj.insert(
+            "type".to_string(),
+            serde_json::Value::String(request.source_type.clone()),
+        );
+        serde_json::Value::Object(obj)
+    };
 
-            if msg.contains("Failed to connect") || msg.contains("connection refused") {
-                ApiError::bad_gateway(format!("Failed to connect to database: {}", msg))
-            } else if msg.contains("Unsupported source type")
-                || msg.contains("Invalid configuration")
-            {
-                ApiError::bad_request(msg.to_string())
-            } else {
-                ApiError::bad_gateway(format!("Failed to connect to database: {}", msg))
-            }
-        })?;
+    // Deserialize to Source enum
+    let source: Source = serde_json::from_value(config_with_type)
+        .map_err(|e| ApiError::bad_request(format!("Invalid source configuration: {}", e)))?;
+
+    let source_type = source.source_type().to_string();
+
+    // Attempt to connect (discovers tables and registers catalog)
+    engine.connect(&request.name, source).await.map_err(|e| {
+        error!("Failed to connect to database: {}", e);
+        // Extract root cause message only - don't expose full stack trace to clients
+        let root_cause = e.root_cause().to_string();
+        let msg = root_cause.lines().next().unwrap_or("Unknown error");
+
+        if msg.contains("Failed to connect") || msg.contains("connection refused") {
+            ApiError::bad_gateway(format!("Failed to connect to database: {}", msg))
+        } else if msg.contains("Unsupported source type") || msg.contains("Invalid configuration") {
+            ApiError::bad_request(msg.to_string())
+        } else {
+            ApiError::bad_gateway(format!("Failed to connect to database: {}", msg))
+        }
+    })?;
 
     // Count discovered tables
     let tables_discovered = engine
@@ -190,7 +206,7 @@ pub async fn create_connection_handler(
         StatusCode::CREATED,
         Json(CreateConnectionResponse {
             name: request.name,
-            source_type: request.source_type,
+            source_type,
             tables_discovered,
         }),
     ))

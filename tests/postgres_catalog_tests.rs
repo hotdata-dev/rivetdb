@@ -1,7 +1,7 @@
-use testcontainers::{runners::AsyncRunner, ImageExt};
-use testcontainers_modules::postgres::Postgres;
 use rivetdb::catalog::CatalogManager;
 use rivetdb::catalog::PostgresCatalogManager;
+use testcontainers::{runners::AsyncRunner, ImageExt};
+use testcontainers_modules::postgres::Postgres;
 
 async fn create_test_manager() -> (
     PostgresCatalogManager,
@@ -15,7 +15,7 @@ async fn create_test_manager() -> (
 
     let host_port = container.get_host_port_ipv4(5432).await.unwrap();
     let connection_string = format!(
-        "host=localhost port={} user=postgres password=postgres dbname=postgres sslmode=disable",
+        "postgres://postgres:postgres@localhost:{}/postgres",
         host_port
     );
 
@@ -77,11 +77,11 @@ async fn test_add_table() {
         .add_connection("test_db", "postgres", config)
         .unwrap();
 
-    let table_id = catalog.add_table(conn_id, "public", "users").unwrap();
+    let table_id = catalog.add_table(conn_id, "public", "users", "").unwrap();
     assert!(table_id > 0);
 
     // Adding same table again should return same id (ON CONFLICT DO NOTHING)
-    let table_id2 = catalog.add_table(conn_id, "public", "users").unwrap();
+    let table_id2 = catalog.add_table(conn_id, "public", "users", "").unwrap();
     assert_eq!(table_id, table_id2);
 }
 
@@ -93,7 +93,7 @@ async fn test_get_table() {
     let conn_id = catalog
         .add_connection("test_db", "postgres", config)
         .unwrap();
-    catalog.add_table(conn_id, "public", "users").unwrap();
+    catalog.add_table(conn_id, "public", "users", "").unwrap();
 
     // Get existing table
     let table = catalog.get_table(conn_id, "public", "users").unwrap();
@@ -116,7 +116,7 @@ async fn test_update_table_sync() {
     let conn_id = catalog
         .add_connection("test_db", "postgres", config)
         .unwrap();
-    let table_id = catalog.add_table(conn_id, "public", "users").unwrap();
+    let table_id = catalog.add_table(conn_id, "public", "users", "").unwrap();
 
     // Update sync info
     catalog
@@ -142,7 +142,7 @@ async fn test_clear_connection_cache_metadata() {
     let conn_id = catalog
         .add_connection("test_db", "postgres", config)
         .unwrap();
-    let table_id = catalog.add_table(conn_id, "public", "users").unwrap();
+    let table_id = catalog.add_table(conn_id, "public", "users", "").unwrap();
 
     // Update table to have paths
     catalog
@@ -182,7 +182,7 @@ async fn test_delete_connection() {
     let conn_id = catalog
         .add_connection("test_db", "postgres", config)
         .unwrap();
-    catalog.add_table(conn_id, "public", "users").unwrap();
+    catalog.add_table(conn_id, "public", "users", "").unwrap();
 
     // Verify connection and table exist
     assert!(catalog.get_connection("test_db").unwrap().is_some());
@@ -233,16 +233,22 @@ async fn test_list_tables_multiple_connections() {
     let conn1_id = catalog
         .add_connection("neon_east", "postgres", config1)
         .unwrap();
-    catalog.add_table(conn1_id, "public", "cities").unwrap();
-    catalog.add_table(conn1_id, "public", "locations").unwrap();
-    catalog.add_table(conn1_id, "public", "table_1").unwrap();
+    catalog.add_table(conn1_id, "public", "cities", "").unwrap();
+    catalog
+        .add_table(conn1_id, "public", "locations", "")
+        .unwrap();
+    catalog
+        .add_table(conn1_id, "public", "table_1", "")
+        .unwrap();
 
     // Add second connection with tables
     let config2 = r#"{"host": "localhost", "port": 5433, "database": "db2"}"#;
     let conn2_id = catalog
         .add_connection("connection2", "postgres", config2)
         .unwrap();
-    catalog.add_table(conn2_id, "public", "table_1").unwrap();
+    catalog
+        .add_table(conn2_id, "public", "table_1", "")
+        .unwrap();
 
     // List all tables (no filter)
     let all_tables = catalog.list_tables(None).unwrap();
@@ -293,10 +299,10 @@ async fn test_list_tables_with_cached_status() {
         .add_connection("test_db", "postgres", config)
         .unwrap();
     let table1_id = catalog
-        .add_table(conn_id, "public", "cached_table")
+        .add_table(conn_id, "public", "cached_table", "")
         .unwrap();
     let _table2_id = catalog
-        .add_table(conn_id, "public", "not_cached_table")
+        .add_table(conn_id, "public", "not_cached_table", "")
         .unwrap();
 
     // Mark one table as cached
@@ -353,8 +359,8 @@ async fn test_clear_table_cache_metadata() {
     let conn_id = catalog
         .add_connection("test_db", "postgres", config)
         .unwrap();
-    let table1_id = catalog.add_table(conn_id, "public", "users").unwrap();
-    let table2_id = catalog.add_table(conn_id, "public", "orders").unwrap();
+    let table1_id = catalog.add_table(conn_id, "public", "users", "").unwrap();
+    let table2_id = catalog.add_table(conn_id, "public", "orders", "").unwrap();
 
     // Update both tables to have paths
     catalog
