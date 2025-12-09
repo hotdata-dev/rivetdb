@@ -216,11 +216,11 @@ impl HotDataEngine {
             error!("Error executing query: {}", e);
             e
         })?;
-        info!("Execution completed in {:?}", start.elapsed());
         let results = df.collect().await.map_err(|e| {
             error!("Error getting query result: {}", e);
             e
         })?;
+        info!("Execution completed in {:?}", start.elapsed());
         info!("Results available");
 
         Ok(QueryResponse {
