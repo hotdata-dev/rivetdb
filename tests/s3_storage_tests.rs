@@ -124,7 +124,7 @@ fn s3_storage_get_credentials_with_config() {
     assert_eq!(creds.endpoint_url, "http://localhost:9000");
 }
 
-/// Test that S3Credentials serializes to JSON with correct field names 
+/// Test that S3Credentials serializes to JSON with correct field names
 #[test]
 fn s3_credentials_serializes_for_dlt() {
     let creds = S3Credentials {
@@ -134,7 +134,7 @@ fn s3_credentials_serializes_for_dlt() {
     };
 
     let json = serde_json::to_value(&creds).unwrap();
-    
+
     assert_eq!(json["aws_access_key_id"], "AKIAIOSFODNN7EXAMPLE");
     assert_eq!(
         json["aws_secret_access_key"],
