@@ -167,6 +167,8 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build and push multi-arch image
         run: |
+          mkdir -p target/release
+
           # Build amd64 image
           cp bin/amd64/server target/release/server
           docker build --platform linux/amd64 -t ghcr.io/${{ github.repository }}:${{ github.sha }}-amd64 .
