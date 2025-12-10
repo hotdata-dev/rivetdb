@@ -5,11 +5,11 @@ use axum::{
     http::{Request, StatusCode},
     Router,
 };
+use rivetdb::datafusion::HotDataEngine;
+use rivetdb::http::app_server::{AppServer, PATH_CONNECTIONS, PATH_QUERY, PATH_TABLES};
 use serde_json::json;
 use tempfile::TempDir;
 use tower::util::ServiceExt;
-use rivetdb::datafusion::HotDataEngine;
-use rivetdb::http::app_server::{AppServer, PATH_CONNECTIONS, PATH_QUERY, PATH_TABLES};
 
 /// Create test router with in-memory engine
 fn setup_test() -> Result<(Router, TempDir)> {

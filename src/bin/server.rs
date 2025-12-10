@@ -1,9 +1,9 @@
 use anyhow::Result;
 use clap::Parser;
-use std::time::Instant;
 use rivetdb::config::AppConfig;
 use rivetdb::datafusion::HotDataEngine;
 use rivetdb::http::app_server::AppServer;
+use std::time::Instant;
 
 #[derive(Parser)]
 #[command(name = "rivet-server", about = "Rivet HTTP Server")]
@@ -50,8 +50,7 @@ async fn main() -> Result<()> {
     tracing::info!("Server listening on {}", addr);
 
     // Start server
-    let server = axum::serve(listener, app.router)
-        .with_graceful_shutdown(shutdown());
+    let server = axum::serve(listener, app.router).with_graceful_shutdown(shutdown());
 
     server.await?;
 

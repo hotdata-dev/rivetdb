@@ -1,6 +1,6 @@
 use anyhow::Result;
-use tempfile::tempdir;
 use rivetdb::datafusion::HotDataEngine;
+use tempfile::tempdir;
 
 /// Test that sync_connection handles non-existent connections correctly
 #[tokio::test]
