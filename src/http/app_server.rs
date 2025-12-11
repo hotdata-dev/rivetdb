@@ -1,7 +1,7 @@
 use crate::datafusion::HotDataEngine;
 use crate::http::handlers::{
-    create_connection_handler, get_connection_handler, health_handler, list_connections_handler,
-    query_handler, tables_handler,
+    create_connection_handler, delete_connection_handler, get_connection_handler, health_handler,
+    list_connections_handler, query_handler, tables_handler,
 };
 use axum::routing::{get, post};
 use axum::Router;
@@ -30,7 +30,10 @@ impl AppServer {
                     PATH_CONNECTIONS,
                     post(create_connection_handler).get(list_connections_handler),
                 )
-                .route(PATH_CONNECTION, get(get_connection_handler))
+                .route(
+                    PATH_CONNECTION,
+                    get(get_connection_handler).delete(delete_connection_handler),
+                )
                 .with_state(engine.clone()),
             engine,
         }

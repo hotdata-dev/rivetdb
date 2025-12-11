@@ -260,3 +260,19 @@ pub async fn get_connection_handler(
         synced_table_count,
     }))
 }
+
+/// Handler for DELETE /connections/{name}
+pub async fn delete_connection_handler(
+    State(engine): State<Arc<HotDataEngine>>,
+    Path(name): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    engine.remove_connection(&name).await.map_err(|e| {
+        if e.to_string().contains("not found") {
+            ApiError::not_found(format!("Connection '{}' not found", name))
+        } else {
+            ApiError::internal_error(e.to_string())
+        }
+    })?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
