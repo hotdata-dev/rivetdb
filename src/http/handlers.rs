@@ -11,6 +11,7 @@ use axum::{
     http::StatusCode,
     Json,
 };
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -289,6 +290,34 @@ pub async fn purge_connection_cache_handler(
             ApiError::internal_error(e.to_string())
         }
     })?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Path parameters for table cache operations
+#[derive(Deserialize)]
+pub struct TableCachePath {
+    name: String,
+    schema: String,
+    table: String,
+}
+
+/// Handler for DELETE /connections/{name}/tables/{schema}/{table}/cache
+pub async fn purge_table_cache_handler(
+    State(engine): State<Arc<HotDataEngine>>,
+    Path(params): Path<TableCachePath>,
+) -> Result<StatusCode, ApiError> {
+    engine
+        .purge_table(&params.name, &params.schema, &params.table)
+        .await
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("not found") {
+                ApiError::not_found(msg)
+            } else {
+                ApiError::internal_error(msg)
+            }
+        })?;
 
     Ok(StatusCode::NO_CONTENT)
 }
