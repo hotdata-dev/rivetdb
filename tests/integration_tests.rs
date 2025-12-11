@@ -121,7 +121,7 @@ impl ConnectionResult {
 
 /// Table info from list operations.
 struct TablesResult {
-    tables: Vec<(String, String)>, // (schema, table)
+    tables: Vec<(String, String, bool)>, // (schema, table, synced)
 }
 
 impl TablesResult {
@@ -129,7 +129,7 @@ impl TablesResult {
         Self {
             tables: tables
                 .iter()
-                .map(|t| (t.schema_name.clone(), t.table_name.clone()))
+                .map(|t| (t.schema_name.clone(), t.table_name.clone(), t.parquet_path.is_some()))
                 .collect(),
         }
     }
@@ -142,7 +142,8 @@ impl TablesResult {
                     .filter_map(|t| {
                         let schema = t["schema"].as_str()?;
                         let table = t["table"].as_str()?;
-                        Some((schema.to_string(), table.to_string()))
+                        let synced = t["synced"].as_bool().unwrap_or(false);
+                        Some((schema.to_string(), table.to_string(), synced))
                     })
                     .collect()
             })
@@ -152,7 +153,7 @@ impl TablesResult {
 
     fn assert_has_table(&self, schema: &str, table: &str) {
         assert!(
-            self.tables.iter().any(|(s, t)| s == schema && t == table),
+            self.tables.iter().any(|(s, t, _)| s == schema && t == table),
             "Table '{}.{}' not found. Available: {:?}",
             schema,
             table,
@@ -163,9 +164,26 @@ impl TablesResult {
     fn assert_not_empty(&self) {
         assert!(!self.tables.is_empty(), "Expected tables but found none");
     }
+
+    fn synced_count(&self) -> usize {
+        self.tables.iter().filter(|(_, _, synced)| *synced).count()
+    }
+
+    fn assert_none_synced(&self) {
+        assert_eq!(self.synced_count(), 0, "Expected no tables to be synced");
+    }
+
+    fn is_table_synced(&self, schema: &str, table: &str) -> bool {
+        self.tables
+            .iter()
+            .find(|(s, t, _)| s == schema && t == table)
+            .map(|(_, _, synced)| *synced)
+            .unwrap_or(false)
+    }
 }
 
 /// Single connection details from get operations.
+#[allow(dead_code)]
 struct ConnectionDetails {
     id: i32,
     name: String,
@@ -552,6 +570,78 @@ async fn run_multi_schema_test(executor: &dyn TestExecutor, source: &Source, con
     products.assert_row_count(1);
 }
 
+/// Run delete connection test scenario.
+async fn run_delete_connection_test(executor: &dyn TestExecutor, source: &Source, conn_name: &str) {
+    // Create connection
+    executor.connect(conn_name, source).await;
+
+    // Verify it exists
+    let conn = executor.get_connection(conn_name).await;
+    assert!(conn.is_some(), "Connection should exist after creation");
+
+    // Delete it
+    let deleted = executor.delete_connection(conn_name).await;
+    assert!(deleted, "Delete should succeed");
+
+    // Verify it's gone
+    let conn = executor.get_connection(conn_name).await;
+    assert!(conn.is_none(), "Connection should not exist after deletion");
+
+    // Verify delete of non-existent returns false
+    let deleted_again = executor.delete_connection(conn_name).await;
+    assert!(!deleted_again, "Delete of non-existent should fail");
+}
+
+/// Run purge connection cache test scenario.
+async fn run_purge_connection_cache_test(executor: &dyn TestExecutor, source: &Source, conn_name: &str) {
+    // Create connection
+    executor.connect(conn_name, source).await;
+
+    // Query to trigger sync
+    let _ = executor.query(&queries::select_orders(conn_name)).await;
+
+    // Verify tables are synced
+    let tables = executor.list_tables(conn_name).await;
+    assert!(tables.synced_count() > 0, "Should have synced tables after query");
+
+    // Purge cache
+    let purged = executor.purge_connection_cache(conn_name).await;
+    assert!(purged, "Purge should succeed");
+
+    // Verify tables still exist but not synced
+    let tables = executor.list_tables(conn_name).await;
+    tables.assert_not_empty();
+    tables.assert_none_synced();
+
+    // Connection should still exist
+    let conn = executor.get_connection(conn_name).await;
+    assert!(conn.is_some(), "Connection should still exist after cache purge");
+}
+
+/// Run purge table cache test scenario.
+async fn run_purge_table_cache_test(executor: &dyn TestExecutor, source: &Source, conn_name: &str) {
+    // Create connection
+    executor.connect(conn_name, source).await;
+
+    // Query to trigger sync of orders table
+    let _ = executor.query(&queries::select_orders(conn_name)).await;
+
+    // Verify orders table is synced
+    let tables = executor.list_tables(conn_name).await;
+    assert!(tables.is_table_synced("sales", "orders"), "orders should be synced");
+
+    // Purge just the orders table cache
+    let purged = executor.purge_table_cache(conn_name, "sales", "orders").await;
+    assert!(purged, "Purge table should succeed");
+
+    // Verify orders is no longer synced
+    let tables = executor.list_tables(conn_name).await;
+    assert!(!tables.is_table_synced("sales", "orders"), "orders should not be synced after purge");
+
+    // Table should still be listed
+    tables.assert_has_table("sales", "orders");
+}
+
 // ============================================================================
 // Data Source Fixtures
 // ============================================================================
@@ -741,6 +831,48 @@ mod duckdb_tests {
         let harness = TestHarness::new();
         run_multi_schema_test(harness.api(), &source, "duckdb_conn").await;
     }
+
+    #[tokio::test]
+    async fn test_engine_delete_connection() {
+        let (_dir, source) = fixtures::duckdb_standard();
+        let harness = TestHarness::new();
+        run_delete_connection_test(harness.engine(), &source, "duckdb_conn").await;
+    }
+
+    #[tokio::test]
+    async fn test_api_delete_connection() {
+        let (_dir, source) = fixtures::duckdb_standard();
+        let harness = TestHarness::new();
+        run_delete_connection_test(harness.api(), &source, "duckdb_conn").await;
+    }
+
+    #[tokio::test]
+    async fn test_engine_purge_connection_cache() {
+        let (_dir, source) = fixtures::duckdb_standard();
+        let harness = TestHarness::new();
+        run_purge_connection_cache_test(harness.engine(), &source, "duckdb_conn").await;
+    }
+
+    #[tokio::test]
+    async fn test_api_purge_connection_cache() {
+        let (_dir, source) = fixtures::duckdb_standard();
+        let harness = TestHarness::new();
+        run_purge_connection_cache_test(harness.api(), &source, "duckdb_conn").await;
+    }
+
+    #[tokio::test]
+    async fn test_engine_purge_table_cache() {
+        let (_dir, source) = fixtures::duckdb_standard();
+        let harness = TestHarness::new();
+        run_purge_table_cache_test(harness.engine(), &source, "duckdb_conn").await;
+    }
+
+    #[tokio::test]
+    async fn test_api_purge_table_cache() {
+        let (_dir, source) = fixtures::duckdb_standard();
+        let harness = TestHarness::new();
+        run_purge_table_cache_test(harness.api(), &source, "duckdb_conn").await;
+    }
 }
 
 // ============================================================================
@@ -776,5 +908,50 @@ mod postgres_tests {
         let fixture = postgres_fixtures::multi_schema().await;
         let harness = TestHarness::new();
         run_multi_schema_test(harness.api(), &fixture.source, "pg_conn").await;
+    }
+}
+
+// ============================================================================
+// Tests - Error Cases
+// ============================================================================
+
+mod error_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_get_nonexistent_connection() {
+        let harness = TestHarness::new();
+
+        // Engine
+        let conn = harness.engine().get_connection("nonexistent").await;
+        assert!(conn.is_none());
+
+        // API
+        let conn = harness.api().get_connection("nonexistent").await;
+        assert!(conn.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_delete_nonexistent_connection() {
+        let harness = TestHarness::new();
+
+        let deleted = harness.api().delete_connection("nonexistent").await;
+        assert!(!deleted, "Delete of nonexistent should return false/404");
+    }
+
+    #[tokio::test]
+    async fn test_purge_nonexistent_connection_cache() {
+        let harness = TestHarness::new();
+
+        let purged = harness.api().purge_connection_cache("nonexistent").await;
+        assert!(!purged, "Purge of nonexistent should return false/404");
+    }
+
+    #[tokio::test]
+    async fn test_purge_nonexistent_table_cache() {
+        let harness = TestHarness::new();
+
+        let purged = harness.api().purge_table_cache("nonexistent", "schema", "table").await;
+        assert!(!purged, "Purge of nonexistent table should return false/404");
     }
 }
