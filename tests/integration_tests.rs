@@ -236,6 +236,24 @@ impl TestExecutor for EngineExecutor {
     async fn query(&self, sql: &str) -> QueryResult {
         QueryResult::from_engine(&self.engine.execute_query(sql).await.unwrap())
     }
+
+    async fn get_connection(&self, name: &str) -> Option<ConnectionDetails> {
+        let conn = self.engine.catalog().get_connection(name).ok()??;
+        let tables = self.engine.list_tables(Some(name)).ok()?;
+        Some(ConnectionDetails::from_engine(&conn, &tables))
+    }
+
+    async fn delete_connection(&self, name: &str) -> bool {
+        self.engine.remove_connection(name).await.is_ok()
+    }
+
+    async fn purge_connection_cache(&self, name: &str) -> bool {
+        self.engine.purge_connection(name).await.is_ok()
+    }
+
+    async fn purge_table_cache(&self, conn: &str, schema: &str, table: &str) -> bool {
+        self.engine.purge_table(conn, schema, table).await.is_ok()
+    }
 }
 
 /// REST API-based test executor.
@@ -345,6 +363,82 @@ impl TestExecutor for ApiExecutor {
             .await
             .unwrap();
         QueryResult::from_api(&serde_json::from_slice(&body).unwrap())
+    }
+
+    async fn get_connection(&self, name: &str) -> Option<ConnectionDetails> {
+        let uri = format!("/connections/{}", name);
+        let response = self
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(&uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        if response.status() != StatusCode::OK {
+            return None;
+        }
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        Some(ConnectionDetails::from_api(&serde_json::from_slice(&body).unwrap()))
+    }
+
+    async fn delete_connection(&self, name: &str) -> bool {
+        let uri = format!("/connections/{}", name);
+        let response = self
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(&uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        response.status() == StatusCode::NO_CONTENT
+    }
+
+    async fn purge_connection_cache(&self, name: &str) -> bool {
+        let uri = format!("/connections/{}/cache", name);
+        let response = self
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(&uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        response.status() == StatusCode::NO_CONTENT
+    }
+
+    async fn purge_table_cache(&self, conn: &str, schema: &str, table: &str) -> bool {
+        let uri = format!("/connections/{}/tables/{}/{}/cache", conn, schema, table);
+        let response = self
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(&uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        response.status() == StatusCode::NO_CONTENT
     }
 }
 
