@@ -21,4 +21,4 @@ RUN mkdir -p ./cache ./state
 EXPOSE 3000
 
 ENTRYPOINT ["./server"]
-CMD ["--config", "config.toml"]
+CMD ["config.toml"]
