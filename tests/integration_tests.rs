@@ -129,7 +129,13 @@ impl TablesResult {
         Self {
             tables: tables
                 .iter()
-                .map(|t| (t.schema_name.clone(), t.table_name.clone(), t.parquet_path.is_some()))
+                .map(|t| {
+                    (
+                        t.schema_name.clone(),
+                        t.table_name.clone(),
+                        t.parquet_path.is_some(),
+                    )
+                })
                 .collect(),
         }
     }
@@ -153,7 +159,9 @@ impl TablesResult {
 
     fn assert_has_table(&self, schema: &str, table: &str) {
         assert!(
-            self.tables.iter().any(|(s, t, _)| s == schema && t == table),
+            self.tables
+                .iter()
+                .any(|(s, t, _)| s == schema && t == table),
             "Table '{}.{}' not found. Available: {:?}",
             schema,
             table,
@@ -193,7 +201,10 @@ struct ConnectionDetails {
 }
 
 impl ConnectionDetails {
-    fn from_engine(conn: &rivetdb::catalog::ConnectionInfo, tables: &[rivetdb::catalog::TableInfo]) -> Self {
+    fn from_engine(
+        conn: &rivetdb::catalog::ConnectionInfo,
+        tables: &[rivetdb::catalog::TableInfo],
+    ) -> Self {
         Self {
             id: conn.id,
             name: conn.name.clone(),
@@ -405,7 +416,9 @@ impl TestExecutor for ApiExecutor {
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
-        Some(ConnectionDetails::from_api(&serde_json::from_slice(&body).unwrap()))
+        Some(ConnectionDetails::from_api(
+            &serde_json::from_slice(&body).unwrap(),
+        ))
     }
 
     async fn delete_connection(&self, name: &str) -> bool {
@@ -593,7 +606,11 @@ async fn run_delete_connection_test(executor: &dyn TestExecutor, source: &Source
 }
 
 /// Run purge connection cache test scenario.
-async fn run_purge_connection_cache_test(executor: &dyn TestExecutor, source: &Source, conn_name: &str) {
+async fn run_purge_connection_cache_test(
+    executor: &dyn TestExecutor,
+    source: &Source,
+    conn_name: &str,
+) {
     // Create connection
     executor.connect(conn_name, source).await;
 
@@ -602,7 +619,10 @@ async fn run_purge_connection_cache_test(executor: &dyn TestExecutor, source: &S
 
     // Verify tables are synced
     let tables = executor.list_tables(conn_name).await;
-    assert!(tables.synced_count() > 0, "Should have synced tables after query");
+    assert!(
+        tables.synced_count() > 0,
+        "Should have synced tables after query"
+    );
 
     // Purge cache
     let purged = executor.purge_connection_cache(conn_name).await;
@@ -615,7 +635,10 @@ async fn run_purge_connection_cache_test(executor: &dyn TestExecutor, source: &S
 
     // Connection should still exist
     let conn = executor.get_connection(conn_name).await;
-    assert!(conn.is_some(), "Connection should still exist after cache purge");
+    assert!(
+        conn.is_some(),
+        "Connection should still exist after cache purge"
+    );
 }
 
 /// Run purge table cache test scenario.
@@ -628,15 +651,23 @@ async fn run_purge_table_cache_test(executor: &dyn TestExecutor, source: &Source
 
     // Verify orders table is synced
     let tables = executor.list_tables(conn_name).await;
-    assert!(tables.is_table_synced("sales", "orders"), "orders should be synced");
+    assert!(
+        tables.is_table_synced("sales", "orders"),
+        "orders should be synced"
+    );
 
     // Purge just the orders table cache
-    let purged = executor.purge_table_cache(conn_name, "sales", "orders").await;
+    let purged = executor
+        .purge_table_cache(conn_name, "sales", "orders")
+        .await;
     assert!(purged, "Purge table should succeed");
 
     // Verify orders is no longer synced
     let tables = executor.list_tables(conn_name).await;
-    assert!(!tables.is_table_synced("sales", "orders"), "orders should not be synced after purge");
+    assert!(
+        !tables.is_table_synced("sales", "orders"),
+        "orders should not be synced after purge"
+    );
 
     // Table should still be listed
     tables.assert_has_table("sales", "orders");
@@ -951,7 +982,13 @@ mod error_tests {
     async fn test_purge_nonexistent_table_cache() {
         let harness = TestHarness::new();
 
-        let purged = harness.api().purge_table_cache("nonexistent", "schema", "table").await;
-        assert!(!purged, "Purge of nonexistent table should return false/404");
+        let purged = harness
+            .api()
+            .purge_table_cache("nonexistent", "schema", "table")
+            .await;
+        assert!(
+            !purged,
+            "Purge of nonexistent table should return false/404"
+        );
     }
 }

@@ -37,7 +37,10 @@ impl AppServer {
                     PATH_CONNECTION,
                     get(get_connection_handler).delete(delete_connection_handler),
                 )
-                .route(PATH_CONNECTION_CACHE, delete(purge_connection_cache_handler))
+                .route(
+                    PATH_CONNECTION_CACHE,
+                    delete(purge_connection_cache_handler),
+                )
                 .route(PATH_TABLE_CACHE, delete(purge_table_cache_handler))
                 .with_state(engine.clone()),
             engine,
