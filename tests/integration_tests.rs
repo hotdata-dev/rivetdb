@@ -165,6 +165,37 @@ impl TablesResult {
     }
 }
 
+/// Single connection details from get operations.
+struct ConnectionDetails {
+    id: i32,
+    name: String,
+    source_type: String,
+    table_count: usize,
+    synced_table_count: usize,
+}
+
+impl ConnectionDetails {
+    fn from_engine(conn: &rivetdb::catalog::ConnectionInfo, tables: &[rivetdb::catalog::TableInfo]) -> Self {
+        Self {
+            id: conn.id,
+            name: conn.name.clone(),
+            source_type: conn.source_type.clone(),
+            table_count: tables.len(),
+            synced_table_count: tables.iter().filter(|t| t.parquet_path.is_some()).count(),
+        }
+    }
+
+    fn from_api(json: &serde_json::Value) -> Self {
+        Self {
+            id: json["id"].as_i64().unwrap_or(0) as i32,
+            name: json["name"].as_str().unwrap_or("").to_string(),
+            source_type: json["source_type"].as_str().unwrap_or("").to_string(),
+            table_count: json["table_count"].as_u64().unwrap_or(0) as usize,
+            synced_table_count: json["synced_table_count"].as_u64().unwrap_or(0) as usize,
+        }
+    }
+}
+
 /// Trait for test execution - allows same test logic for engine vs API.
 #[async_trait::async_trait]
 trait TestExecutor: Send + Sync {
@@ -172,6 +203,12 @@ trait TestExecutor: Send + Sync {
     async fn list_connections(&self) -> ConnectionResult;
     async fn list_tables(&self, connection: &str) -> TablesResult;
     async fn query(&self, sql: &str) -> QueryResult;
+
+    // New methods for CRUD operations
+    async fn get_connection(&self, name: &str) -> Option<ConnectionDetails>;
+    async fn delete_connection(&self, name: &str) -> bool;
+    async fn purge_connection_cache(&self, name: &str) -> bool;
+    async fn purge_table_cache(&self, conn: &str, schema: &str, table: &str) -> bool;
 }
 
 /// Engine-based test executor.
