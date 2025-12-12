@@ -5,23 +5,20 @@
   </picture>
 </div>
 
-> _Query everything — **instantly**._
 
 # RivetDB
 
-Query everything — instantly.
+> _Query everything — **instantly**._
 
 RivetDB is a high-performance, federated query engine built on a smart, just-in-time cache.
-It provides a Trino-style SQL interface for querying remote data sources without needing heavy infrastructure.
-The goal is to unify data access across systems while still getting fast, reliable performance on a single node.
 
-RivetDB takes insperation from the [DuckDB](https://duckdb.org/)  and SmallData community, which has shown how much you can get out of a single machine when you pair simplicity, vectorized execution, and efficient columnar formats. RivetDB applies that same thinking to federated data, using Arrow-native execution to make remote sources feel local. We think this is going to be especially important as agents query disparate systems and want to avoid scattering data fetching logic.
+It provides a Trino-style SQL interface for querying remote data sources without needing heavy infrastructure. The goal is to unify data access across systems while still getting fast, reliable performance on a single node.
+
+RivetDB takes inspiration from [DuckDB](https://duckdb.org/) and the Small Data community, which has shown how much you can get out of a single machine when you pair simplicity, vectorized execution, and efficient columnar formats. RivetDB applies that same thinking to federated data, using Arrow-native execution to make remote sources feel local. We think this is going to be especially important as agents query disparate systems and want to avoid scattering data fetching logic.
 
 Under the hood, RivetDB is built in Rust and powered by [Apache DataFusion](https://datafusion.apache.org/). The combination gives us strong safety guarantees, solid performance, and a proven execution engine that plays well with Arrow.
 
 RivetDB is under active development, and the APIs will continue to shift as we move toward a stable 1.0 release.
-ment, and the APIs will continue to shift as we move toward a stable 1.0 release.
-
 
 > **🚧 Early Development:** We are targeting a public preview with caching, lookup APIs, and a CLI in **Q1 2026**.  
 > Expect breaking changes until the API surface stabilizes.
@@ -68,11 +65,11 @@ RivetDB aims to become a unified query engine that eliminates challenges working
 
 - A consistent SQL interface for structured, semi-structured, and remote data sources
 - Intelligent caching that adapts to query patterns and reduces data movement
-- Tight integration with modern data platforms
-- Tooling that gives developers fast introspection into data, metadata, and performance
-- Clear APIs and predictable behavior
+- Tooling that gives developers introspection into data, metadata, and performance
+- Millisecond startup times for on-demand ephemeral compute 
+- Developer-friendly documentation and APIs
 
-The long-term trajectory includes distributed caching, richer connectors, real-time introspection, and seamless orchestration integration.
+The long-term goal includes distributed caching, additional connectors, real-time introspection, and seamless orchestration integration.
 
 ---
 
