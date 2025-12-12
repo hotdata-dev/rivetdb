@@ -2,8 +2,6 @@ use crate::catalog::manager::{CatalogManager, ConnectionInfo, TableInfo};
 use crate::catalog::migrations::{run_migrations, CatalogMigrations};
 use crate::catalog::store::CatalogStore;
 use anyhow::Result;
-use futures::future::BoxFuture;
-use futures::FutureExt;
 use sqlx::{Sqlite, SqlitePool};
 use std::fmt::Debug;
 use tokio::task::block_in_place;
@@ -37,45 +35,42 @@ impl SqliteCatalogManager {
         run_migrations::<SqliteMigrationBackend>(pool).await
     }
 
-    fn sqlite_initialize_schema(pool: &SqlitePool) -> BoxFuture<'_, Result<()>> {
-        async move {
-            sqlx::query(
-                r#"
-                CREATE TABLE IF NOT EXISTS connections (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT UNIQUE NOT NULL,
-                    source_type TEXT NOT NULL,
-                    config_json TEXT NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            "#,
+    async fn sqlite_initialize_schema(pool: &SqlitePool) -> Result<()> {
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS connections (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL,
+                source_type TEXT NOT NULL,
+                config_json TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
-            .execute(pool)
-            .await?;
+        "#,
+        )
+        .execute(pool)
+        .await?;
 
-            sqlx::query(
-                r#"
-                CREATE TABLE IF NOT EXISTS tables (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    connection_id INTEGER NOT NULL,
-                    schema_name TEXT NOT NULL,
-                    table_name TEXT NOT NULL,
-                    parquet_path TEXT,
-                    state_path TEXT,
-                    last_sync TIMESTAMP,
-                    arrow_schema_json TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (connection_id) REFERENCES connections(id),
-                    UNIQUE (connection_id, schema_name, table_name)
-                )
-            "#,
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS tables (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                connection_id INTEGER NOT NULL,
+                schema_name TEXT NOT NULL,
+                table_name TEXT NOT NULL,
+                parquet_path TEXT,
+                state_path TEXT,
+                last_sync TIMESTAMP,
+                arrow_schema_json TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (connection_id) REFERENCES connections(id),
+                UNIQUE (connection_id, schema_name, table_name)
             )
-            .execute(pool)
-            .await?;
+        "#,
+        )
+        .execute(pool)
+        .await?;
 
-            Ok(())
-        }
-        .boxed()
+        Ok(())
     }
 
     fn block_on<F, T>(&self, f: F) -> Result<T>
@@ -175,44 +170,36 @@ impl Debug for SqliteCatalogManager {
 impl CatalogMigrations for SqliteMigrationBackend {
     type Pool = SqlitePool;
 
-    fn ensure_migrations_table(pool: &Self::Pool) -> BoxFuture<'_, Result<()>> {
-        async move {
-            sqlx::query(
-                r#"
-                CREATE TABLE IF NOT EXISTS schema_migrations (
-                    version INTEGER PRIMARY KEY,
-                    applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-                "#,
+    async fn ensure_migrations_table(pool: &Self::Pool) -> Result<()> {
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                version INTEGER PRIMARY KEY,
+                applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
+            "#,
+        )
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn current_version(pool: &Self::Pool) -> Result<i64> {
+        sqlx::query_scalar("SELECT COALESCE(MAX(version), 0) FROM schema_migrations")
+            .fetch_one(pool)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn record_version(pool: &Self::Pool, version: i64) -> Result<()> {
+        sqlx::query("INSERT INTO schema_migrations (version) VALUES (?)")
+            .bind(version)
             .execute(pool)
             .await?;
-            Ok(())
-        }
-        .boxed()
+        Ok(())
     }
 
-    fn current_version(pool: &Self::Pool) -> BoxFuture<'_, Result<i64>> {
-        async move {
-            sqlx::query_scalar("SELECT COALESCE(MAX(version), 0) FROM schema_migrations")
-                .fetch_one(pool)
-                .await
-                .map_err(Into::into)
-        }
-        .boxed()
-    }
-
-    fn record_version(pool: &Self::Pool, version: i64) -> BoxFuture<'_, Result<()>> {
-        async move {
-            sqlx::query("INSERT INTO schema_migrations (version) VALUES (?)")
-                .bind(version)
-                .execute(pool)
-                .await?;
-            Ok(())
-        }
-        .boxed()
-    }
-    fn migrate_v1(pool: &Self::Pool) -> BoxFuture<'_, Result<()>> {
-        SqliteCatalogManager::sqlite_initialize_schema(pool)
+    async fn migrate_v1(pool: &Self::Pool) -> Result<()> {
+        SqliteCatalogManager::sqlite_initialize_schema(pool).await
     }
 }

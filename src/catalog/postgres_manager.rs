@@ -2,8 +2,6 @@ use crate::catalog::manager::{CatalogManager, ConnectionInfo, TableInfo};
 use crate::catalog::migrations::{run_migrations, CatalogMigrations};
 use crate::catalog::store::CatalogStore;
 use anyhow::Result;
-use futures::future::BoxFuture;
-use futures::FutureExt;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Postgres};
 use std::fmt::{self, Debug, Formatter};
@@ -41,41 +39,38 @@ impl PostgresCatalogManager {
         run_migrations::<PostgresMigrationBackend>(pool).await
     }
 
-    fn postgres_initialize_schema(pool: &PgPool) -> BoxFuture<'_, Result<()>> {
-        async move {
-            sqlx::query(
-                "CREATE TABLE IF NOT EXISTS connections (
-                    id SERIAL PRIMARY KEY,
-                    name TEXT UNIQUE NOT NULL,
-                    source_type TEXT NOT NULL,
-                    config_json TEXT NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )",
-            )
-            .execute(pool)
-            .await?;
+    async fn postgres_initialize_schema(pool: &PgPool) -> Result<()> {
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS connections (
+                id SERIAL PRIMARY KEY,
+                name TEXT UNIQUE NOT NULL,
+                source_type TEXT NOT NULL,
+                config_json TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )",
+        )
+        .execute(pool)
+        .await?;
 
-            sqlx::query(
-                "CREATE TABLE IF NOT EXISTS tables (
-                    id SERIAL PRIMARY KEY,
-                    connection_id INTEGER NOT NULL,
-                    schema_name TEXT NOT NULL,
-                    table_name TEXT NOT NULL,
-                    parquet_path TEXT,
-                    state_path TEXT,
-                    last_sync TIMESTAMP,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    arrow_schema_json TEXT,
-                    FOREIGN KEY (connection_id) REFERENCES connections(id),
-                    UNIQUE (connection_id, schema_name, table_name)
-                )",
-            )
-            .execute(pool)
-            .await?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS tables (
+                id SERIAL PRIMARY KEY,
+                connection_id INTEGER NOT NULL,
+                schema_name TEXT NOT NULL,
+                table_name TEXT NOT NULL,
+                parquet_path TEXT,
+                state_path TEXT,
+                last_sync TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                arrow_schema_json TEXT,
+                FOREIGN KEY (connection_id) REFERENCES connections(id),
+                UNIQUE (connection_id, schema_name, table_name)
+            )",
+        )
+        .execute(pool)
+        .await?;
 
-            Ok(())
-        }
-        .boxed()
+        Ok(())
     }
 }
 
@@ -84,43 +79,35 @@ struct PostgresMigrationBackend;
 impl CatalogMigrations for PostgresMigrationBackend {
     type Pool = PgPool;
 
-    fn ensure_migrations_table(pool: &Self::Pool) -> BoxFuture<'_, Result<()>> {
-        async move {
-            sqlx::query(
-                "CREATE TABLE IF NOT EXISTS schema_migrations (
-                    version BIGINT PRIMARY KEY,
-                    applied_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-                )",
-            )
+    async fn ensure_migrations_table(pool: &Self::Pool) -> Result<()> {
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS schema_migrations (
+                version BIGINT PRIMARY KEY,
+                applied_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            )",
+        )
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn current_version(pool: &Self::Pool) -> Result<i64> {
+        sqlx::query_scalar("SELECT COALESCE(MAX(version), 0) FROM schema_migrations")
+            .fetch_one(pool)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn record_version(pool: &Self::Pool, version: i64) -> Result<()> {
+        sqlx::query("INSERT INTO schema_migrations (version) VALUES ($1)")
+            .bind(version)
             .execute(pool)
             .await?;
-            Ok(())
-        }
-        .boxed()
+        Ok(())
     }
 
-    fn current_version(pool: &Self::Pool) -> BoxFuture<'_, Result<i64>> {
-        async move {
-            sqlx::query_scalar("SELECT COALESCE(MAX(version), 0) FROM schema_migrations")
-                .fetch_one(pool)
-                .await
-                .map_err(Into::into)
-        }
-        .boxed()
-    }
-
-    fn record_version(pool: &Self::Pool, version: i64) -> BoxFuture<'_, Result<()>> {
-        async move {
-            sqlx::query("INSERT INTO schema_migrations (version) VALUES ($1)")
-                .bind(version)
-                .execute(pool)
-                .await?;
-            Ok(())
-        }
-        .boxed()
-    }
-    fn migrate_v1(pool: &Self::Pool) -> BoxFuture<'_, Result<()>> {
-        PostgresCatalogManager::postgres_initialize_schema(pool)
+    async fn migrate_v1(pool: &Self::Pool) -> Result<()> {
+        PostgresCatalogManager::postgres_initialize_schema(pool).await
     }
 }
 

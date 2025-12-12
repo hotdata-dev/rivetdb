@@ -5,7 +5,6 @@
 //! logic while sharing a common execution framework.
 
 use anyhow::Result;
-use futures::future::BoxFuture;
 
 /// Trait for implementing catalog schema migrations.
 ///
@@ -26,16 +25,16 @@ pub trait CatalogMigrations {
     type Pool;
 
     /// Creates the migrations tracking table if it doesn't exist.
-    fn ensure_migrations_table(pool: &Self::Pool) -> BoxFuture<'_, Result<()>>;
+    async fn ensure_migrations_table(pool: &Self::Pool) -> Result<()>;
 
     /// Returns the current schema version, or 0 if no migrations have been applied.
-    fn current_version(pool: &Self::Pool) -> BoxFuture<'_, Result<i64>>;
+    async fn current_version(pool: &Self::Pool) -> Result<i64>;
 
     /// Records that a migration version has been successfully applied.
-    fn record_version(pool: &Self::Pool, version: i64) -> BoxFuture<'_, Result<()>>;
+    async fn record_version(pool: &Self::Pool, version: i64) -> Result<()>;
 
     /// Applies the v1 schema migration (initial schema setup).
-    fn migrate_v1(pool: &Self::Pool) -> BoxFuture<'_, Result<()>>;
+    async fn migrate_v1(pool: &Self::Pool) -> Result<()>;
 }
 
 /// Runs all pending migrations for a catalog backend.
@@ -56,16 +55,11 @@ pub trait CatalogMigrations {
 pub async fn run_migrations<M: CatalogMigrations>(pool: &M::Pool) -> Result<()> {
     M::ensure_migrations_table(pool).await?;
 
-    let mut current_version = M::current_version(pool).await?;
-    let steps: &[(i64, for<'a> fn(&'a M::Pool) -> BoxFuture<'a, Result<()>>)] =
-        &[(1, M::migrate_v1)];
+    let current_version = M::current_version(pool).await?;
 
-    for (version, apply) in steps {
-        if current_version < *version {
-            apply(pool).await?;
-            M::record_version(pool, *version).await?;
-            current_version = *version;
-        }
+    if current_version < 1 {
+        M::migrate_v1(pool).await?;
+        M::record_version(pool, 1).await?;
     }
 
     Ok(())
