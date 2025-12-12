@@ -5,11 +5,10 @@
   </picture>
 </div>
 
-> _Query everything — **instantly**._
 
 # RivetDB
 
-Query everything — instantly.
+> _Query everything — **instantly**._
 
 RivetDB is a high-performance, federated query engine built on a smart, just-in-time cache.
 It provides a Trino-style SQL interface for querying remote data sources without needing heavy infrastructure.
