@@ -444,7 +444,7 @@ impl HotDataEngine {
     /// Create a new engine from application configuration.
     /// This is a convenience method that sets up catalog and storage based on the config.
     pub fn from_config(config: &crate::config::AppConfig) -> Result<Self> {
-        // Determine metadata directory
+        // Determine metadata directory root (defaults to ~/.hotdata/rivetdb)
         let metadata_dir = if let Some(cache_dir) = &config.paths.cache_dir {
             PathBuf::from(cache_dir)
                 .parent()
@@ -463,8 +463,24 @@ impl HotDataEngine {
             PathBuf::from(home).join(".hotdata").join("rivetdb")
         };
 
-        // Create metadata directory if it doesn't exist
+        // Default cache/state directories live under metadata dir unless explicitly set
+        let cache_dir_path = config
+            .paths
+            .cache_dir
+            .as_ref()
+            .map(|p| PathBuf::from(p))
+            .unwrap_or_else(|| metadata_dir.join("cache"));
+        let state_dir_path = config
+            .paths
+            .state_dir
+            .as_ref()
+            .map(|p| PathBuf::from(p))
+            .unwrap_or_else(|| metadata_dir.join("state"));
+
+        // Ensure directories exist before using them
         std::fs::create_dir_all(&metadata_dir)?;
+        std::fs::create_dir_all(&cache_dir_path)?;
+        std::fs::create_dir_all(&state_dir_path)?;
 
         // Create catalog manager based on config
         let catalog: Arc<dyn CatalogManager> = match config.catalog.catalog_type.as_str() {
@@ -514,9 +530,13 @@ impl HotDataEngine {
         // Create storage manager based on config
         let storage: Arc<dyn StorageManager> = match config.storage.storage_type.as_str() {
             "filesystem" => {
-                let cache_dir = config.paths.cache_dir.as_deref().unwrap_or("cache");
-                let state_dir = config.paths.state_dir.as_deref().unwrap_or("state");
-                Arc::new(FilesystemStorage::new(cache_dir, state_dir))
+                let cache_dir_str = cache_dir_path
+                    .to_str()
+                    .ok_or_else(|| anyhow::anyhow!("Invalid cache directory path"))?;
+                let state_dir_str = state_dir_path
+                    .to_str()
+                    .ok_or_else(|| anyhow::anyhow!("Invalid state directory path"))?;
+                Arc::new(FilesystemStorage::new(cache_dir_str, state_dir_str))
             }
             "s3" => {
                 let bucket = config
