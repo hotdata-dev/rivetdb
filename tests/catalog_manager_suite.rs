@@ -1,6 +1,4 @@
-use rivetdb::catalog::{
-    CatalogManager, DuckdbCatalogManager, PostgresCatalogManager, SqliteCatalogManager,
-};
+use rivetdb::catalog::{CatalogManager, PostgresCatalogManager, SqliteCatalogManager};
 use tempfile::TempDir;
 use testcontainers::{runners::AsyncRunner, ImageExt};
 use testcontainers_modules::postgres::Postgres;
@@ -23,14 +21,6 @@ impl<M: CatalogManager, G> CatalogTestContext<M, G> {
     fn manager(&self) -> &M {
         &self.manager
     }
-}
-
-async fn create_duckdb_catalog() -> CatalogTestContext<DuckdbCatalogManager, TempDir> {
-    let dir = TempDir::new().expect("failed to create temp dir");
-    let db_path = dir.path().join("catalog.duckdb");
-    let manager = DuckdbCatalogManager::new(db_path.to_str().unwrap()).unwrap();
-    manager.run_migrations().unwrap();
-    CatalogTestContext::new(manager, dir)
 }
 
 async fn create_sqlite_catalog() -> CatalogTestContext<SqliteCatalogManager, TempDir> {
@@ -401,6 +391,5 @@ macro_rules! catalog_manager_tests {
     };
 }
 
-catalog_manager_tests!(duckdb, create_duckdb_catalog);
 catalog_manager_tests!(sqlite, create_sqlite_catalog);
 catalog_manager_tests!(postgres, create_postgres_catalog);

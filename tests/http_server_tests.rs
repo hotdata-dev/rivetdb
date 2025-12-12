@@ -31,7 +31,7 @@ fn setup_test() -> Result<(Router, TempDir)> {
     Ok((app.router, temp_dir))
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_query_endpoint_simple_select() -> Result<()> {
     let response = _send_query("SELECT 1 as num, 'hello' as text").await?;
 
@@ -50,7 +50,7 @@ async fn test_query_endpoint_simple_select() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_query_endpoint_multiple_rows() -> Result<()> {
     let response =
         _send_query("SELECT * FROM (VALUES (1, 'a'), (2, 'b'), (3, 'c')) AS t(id, name)").await?;
@@ -75,7 +75,7 @@ async fn test_query_endpoint_multiple_rows() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::approx_constant)]
 async fn test_query_endpoint_different_data_types() -> Result<()> {
     let response =
@@ -102,7 +102,7 @@ async fn test_query_endpoint_different_data_types() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_query_endpoint_null_values() -> Result<()> {
     let response = _send_query("SELECT NULL as null_col, 1 as int_col").await?;
 
@@ -121,7 +121,7 @@ async fn test_query_endpoint_null_values() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_query_endpoint_empty_result() -> Result<()> {
     let response = _send_query("SELECT 1 as num WHERE 1 = 0").await?;
 
@@ -137,7 +137,7 @@ async fn test_query_endpoint_empty_result() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_query_endpoint_invalid_sql_text() -> Result<()> {
     let queries = vec!["", "   \n\t  "];
 
@@ -156,7 +156,7 @@ async fn test_query_endpoint_invalid_sql_text() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_query_endpoint_invalid_sql() -> Result<()> {
     let response = _send_query("SELECT * FROM nonexistent_table_12345").await?;
 
@@ -172,7 +172,7 @@ async fn test_query_endpoint_invalid_sql() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_query_endpoint_malformed_json() -> Result<()> {
     let (app, _tempdir) = setup_test()?;
 
@@ -191,7 +191,7 @@ async fn test_query_endpoint_malformed_json() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_query_endpoint_missing_sql_field() -> Result<()> {
     let (app, _tempdir) = setup_test()?;
 
@@ -213,7 +213,7 @@ async fn test_query_endpoint_missing_sql_field() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_tables_endpoint_empty() -> Result<()> {
     let (app, _tempdir) = setup_test()?;
 
@@ -238,7 +238,7 @@ async fn test_tables_endpoint_empty() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_tables_endpoint_with_connection_filter_not_found() -> Result<()> {
     let (app, _tempdir) = setup_test()?;
 
@@ -265,7 +265,7 @@ async fn test_tables_endpoint_with_connection_filter_not_found() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_query_endpoint_aggregate_functions() -> Result<()> {
     let sql = "\
         SELECT COUNT(*) as count, SUM(val) as total, AVG(val) as average \
@@ -286,7 +286,7 @@ async fn test_query_endpoint_aggregate_functions() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_query_endpoint_group_by() -> Result<()> {
     let sql = "\
         SELECT category, COUNT(*) as count \
@@ -310,7 +310,7 @@ async fn test_query_endpoint_group_by() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_query_endpoint_joins() -> Result<()> {
     let sql = "SELECT a.id, a.name, b.value FROM (VALUES \
     (1, 'Alice'), \
@@ -353,7 +353,7 @@ async fn _send_query(sql: &str) -> Result<Response> {
 
 // ==================== Connection Endpoint Tests ====================
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_list_connections_empty() -> Result<()> {
     let (app, _tempdir) = setup_test()?;
 
@@ -377,7 +377,7 @@ async fn test_list_connections_empty() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_create_connection_empty_name() -> Result<()> {
     let (app, _tempdir) = setup_test()?;
 
@@ -405,7 +405,7 @@ async fn test_create_connection_empty_name() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_create_connection_unsupported_source_type() -> Result<()> {
     let (app, _tempdir) = setup_test()?;
 
@@ -436,7 +436,7 @@ async fn test_create_connection_unsupported_source_type() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_create_connection_missing_fields() -> Result<()> {
     let (app, _tempdir) = setup_test()?;
 

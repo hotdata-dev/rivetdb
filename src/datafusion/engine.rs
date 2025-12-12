@@ -1,5 +1,5 @@
 use super::catalog_provider::HotDataCatalogProvider;
-use crate::catalog::{CatalogManager, ConnectionInfo, DuckdbCatalogManager, TableInfo};
+use crate::catalog::{CatalogManager, ConnectionInfo, SqliteCatalogManager, TableInfo};
 use crate::datafetch::DataFetcher;
 use crate::source::Source;
 use crate::storage::{FilesystemStorage, StorageManager};
@@ -49,9 +49,9 @@ impl HotDataEngine {
     pub fn new_with_storage(
         catalog_path: &str,
         storage: Arc<dyn StorageManager>,
-        readonly: bool,
+        _readonly: bool,
     ) -> Result<Self> {
-        let catalog = DuckdbCatalogManager::new_readonly(catalog_path, readonly)?;
+        let catalog = SqliteCatalogManager::new(catalog_path)?;
         catalog.run_migrations()?;
 
         let df_ctx = SessionContext::new();
@@ -115,7 +115,7 @@ impl HotDataEngine {
         &self.storage
     }
 
-    /// Register all connections from the DuckDB catalog as DataFusion catalogs.
+    /// Register all connections from the catalog store as DataFusion catalogs.
     fn register_existing_connections(&mut self) -> Result<()> {
         let connections = self.catalog.list_connections()?;
 
@@ -319,7 +319,7 @@ impl HotDataEngine {
 
         // Note: DataFusion doesn't support deregistering catalogs in v50.3.0
         // The catalog will remain registered but will return no schemas/tables
-        // since the DuckDB catalog has been cleaned up
+        // since the metadata catalog has been cleaned up
 
         Ok(())
     }
@@ -468,13 +468,12 @@ impl HotDataEngine {
 
         // Create catalog manager based on config
         let catalog: Arc<dyn CatalogManager> = match config.catalog.catalog_type.as_str() {
-            "duckdb" => {
+            "sqlite" => {
                 let catalog_path = metadata_dir.join("catalog.db");
-                Arc::new(DuckdbCatalogManager::new_readonly(
+                Arc::new(SqliteCatalogManager::new(
                     catalog_path
                         .to_str()
                         .ok_or_else(|| anyhow::anyhow!("Invalid catalog path"))?,
-                    false,
                 )?)
             }
             "postgres" => {
@@ -568,16 +567,14 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    #[test]
-    fn test_builder_pattern() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_builder_pattern() {
         let temp_dir = TempDir::new().unwrap();
         let metadata_dir = temp_dir.path().to_path_buf();
         let catalog_path = metadata_dir.join("catalog.db");
 
         // Create catalog and storage
-        let catalog = Arc::new(
-            DuckdbCatalogManager::new_readonly(catalog_path.to_str().unwrap(), false).unwrap(),
-        );
+        let catalog = Arc::new(SqliteCatalogManager::new(catalog_path.to_str().unwrap()).unwrap());
 
         let storage = Arc::new(FilesystemStorage::new(
             temp_dir.path().join("cache").to_str().unwrap(),
@@ -622,8 +619,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_from_config_duckdb_filesystem() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_from_config_sqlite_filesystem() {
         use crate::config::{AppConfig, CatalogConfig, PathsConfig, ServerConfig, StorageConfig};
 
         let temp_dir = TempDir::new().unwrap();
@@ -636,7 +633,7 @@ mod tests {
                 port: 3000,
             },
             catalog: CatalogConfig {
-                catalog_type: "duckdb".to_string(),
+                catalog_type: "sqlite".to_string(),
                 host: None,
                 port: None,
                 database: None,

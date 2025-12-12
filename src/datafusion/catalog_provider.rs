@@ -82,7 +82,7 @@ impl CatalogProvider for HotDataCatalogProvider {
     }
 
     fn schema_names(&self) -> Vec<String> {
-        // Return all known schema names from DuckDB catalog for this connection
+        // Return schema names tracked in the catalog store for this connection
         match self.catalog.list_tables(Some(self.connection_id)) {
             Ok(tables) => {
                 let mut schemas: Vec<String> = tables

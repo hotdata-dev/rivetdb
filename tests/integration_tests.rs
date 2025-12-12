@@ -835,70 +835,70 @@ mod postgres_fixtures {
 mod duckdb_tests {
     use super::*;
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_engine_golden_path() {
         let (_dir, source) = fixtures::duckdb_standard();
         let harness = TestHarness::new();
         run_golden_path_test(harness.engine(), &source, "duckdb_conn").await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_api_golden_path() {
         let (_dir, source) = fixtures::duckdb_standard();
         let harness = TestHarness::new();
         run_golden_path_test(harness.api(), &source, "duckdb_conn").await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_engine_multi_schema() {
         let (_dir, source) = fixtures::duckdb_multi_schema();
         let harness = TestHarness::new();
         run_multi_schema_test(harness.engine(), &source, "duckdb_conn").await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_api_multi_schema() {
         let (_dir, source) = fixtures::duckdb_multi_schema();
         let harness = TestHarness::new();
         run_multi_schema_test(harness.api(), &source, "duckdb_conn").await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_engine_delete_connection() {
         let (_dir, source) = fixtures::duckdb_standard();
         let harness = TestHarness::new();
         run_delete_connection_test(harness.engine(), &source, "duckdb_conn").await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_api_delete_connection() {
         let (_dir, source) = fixtures::duckdb_standard();
         let harness = TestHarness::new();
         run_delete_connection_test(harness.api(), &source, "duckdb_conn").await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_engine_purge_connection_cache() {
         let (_dir, source) = fixtures::duckdb_standard();
         let harness = TestHarness::new();
         run_purge_connection_cache_test(harness.engine(), &source, "duckdb_conn").await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_api_purge_connection_cache() {
         let (_dir, source) = fixtures::duckdb_standard();
         let harness = TestHarness::new();
         run_purge_connection_cache_test(harness.api(), &source, "duckdb_conn").await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_engine_purge_table_cache() {
         let (_dir, source) = fixtures::duckdb_standard();
         let harness = TestHarness::new();
         run_purge_table_cache_test(harness.engine(), &source, "duckdb_conn").await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_api_purge_table_cache() {
         let (_dir, source) = fixtures::duckdb_standard();
         let harness = TestHarness::new();
@@ -949,7 +949,7 @@ mod postgres_tests {
 mod error_tests {
     use super::*;
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_get_nonexistent_connection() {
         let harness = TestHarness::new();
 
@@ -962,7 +962,7 @@ mod error_tests {
         assert!(conn.is_none());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_delete_nonexistent_connection() {
         let harness = TestHarness::new();
 
@@ -970,7 +970,7 @@ mod error_tests {
         assert!(!deleted, "Delete of nonexistent should return false/404");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_purge_nonexistent_connection_cache() {
         let harness = TestHarness::new();
 
@@ -978,7 +978,7 @@ mod error_tests {
         assert!(!purged, "Purge of nonexistent should return false/404");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_purge_nonexistent_table_cache() {
         let harness = TestHarness::new();
 

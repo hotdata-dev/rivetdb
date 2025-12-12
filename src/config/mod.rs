@@ -94,8 +94,8 @@ impl AppConfig {
                     anyhow::bail!("Postgres catalog requires 'password'");
                 }
             }
-            "duckdb" => {
-                // DuckDB uses paths config, no additional validation needed
+            "sqlite" => {
+                // SQLite uses paths config, no additional validation needed
             }
             _ => anyhow::bail!("Invalid catalog type: {}", self.catalog.catalog_type),
         }
