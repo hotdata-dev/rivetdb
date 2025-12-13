@@ -1,3 +1,26 @@
+//! Database backend abstraction for the catalog.
+//!
+//! This module provides a generic database backend that works with any sqlx-compatible
+//! database (currently Postgres and SQLite). It abstracts over database-specific differences
+//! like parameter binding syntax while providing a unified API for catalog operations.
+//!
+//! # Architecture
+//!
+//! The [`CatalogBackend`] struct is parameterized by a database type that implements
+//! [`CatalogDatabase`]. This trait extends sqlx's `Database` trait with additional
+//! functionality needed for cross-database compatibility.
+//!
+//! # Example
+//!
+//! ```ignore
+//! use rivetdb::catalog::backend::CatalogBackend;
+//! use sqlx::SqlitePool;
+//!
+//! let pool = SqlitePool::connect("sqlite::memory:").await?;
+//! let backend = CatalogBackend::new(pool);
+//! let connections = backend.list_connections().await?;
+//! ```
+
 use crate::catalog::manager::{ConnectionInfo, TableInfo};
 use anyhow::{anyhow, Result};
 use sqlx::{
@@ -6,7 +29,15 @@ use sqlx::{
 };
 use std::borrow::Cow;
 
+/// Extension trait for sqlx databases that provides catalog-specific functionality.
+///
+/// This trait handles differences in SQL syntax between database backends,
+/// particularly parameter binding syntax (e.g., `$1` for Postgres vs `?` for SQLite).
 pub trait CatalogDatabase: Database {
+    /// Returns the parameter placeholder for the given 1-based index.
+    ///
+    /// - Postgres uses `$1`, `$2`, etc.
+    /// - SQLite uses `?` for all parameters (index is ignored).
     fn bind_param(index: usize) -> Cow<'static, str>;
 }
 
@@ -22,21 +53,27 @@ impl CatalogDatabase for Sqlite {
     }
 }
 
-pub struct CatalogStore<DB: CatalogDatabase> {
+/// Generic database backend for catalog operations.
+///
+/// Wraps a sqlx connection pool and provides methods for managing connections
+/// and tables in the catalog. Works with any database that implements [`CatalogDatabase`].
+pub struct CatalogBackend<DB: CatalogDatabase> {
     pool: Pool<DB>,
 }
 
-impl<DB: CatalogDatabase> CatalogStore<DB> {
+impl<DB: CatalogDatabase> CatalogBackend<DB> {
+    /// Creates a new backend with the given connection pool.
     pub fn new(pool: Pool<DB>) -> Self {
         Self { pool }
     }
 
+    /// Returns a reference to the underlying connection pool.
     pub fn pool(&self) -> &Pool<DB> {
         &self.pool
     }
 }
 
-impl<DB> CatalogStore<DB>
+impl<DB> CatalogBackend<DB>
 where
     DB: CatalogDatabase,
     ConnectionInfo: for<'r> FromRow<'r, DB::Row>,

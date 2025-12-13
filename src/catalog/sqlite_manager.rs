@@ -1,12 +1,12 @@
+use crate::catalog::backend::CatalogBackend;
 use crate::catalog::manager::{block_on, CatalogManager, ConnectionInfo, TableInfo};
 use crate::catalog::migrations::{run_migrations, CatalogMigrations};
-use crate::catalog::store::CatalogStore;
 use anyhow::Result;
 use sqlx::{Sqlite, SqlitePool};
 use std::fmt::{self, Debug, Formatter};
 
 pub struct SqliteCatalogManager {
-    store: CatalogStore<Sqlite>,
+    backend: CatalogBackend<Sqlite>,
     catalog_path: String,
 }
 
@@ -28,10 +28,10 @@ impl SqliteCatalogManager {
     async fn new_async(db_path: &str) -> Result<Self> {
         let uri = format!("sqlite:{}?mode=rwc", db_path);
         let pool = SqlitePool::connect(&uri).await?;
-        let store = CatalogStore::new(pool);
+        let backend = CatalogBackend::new(pool);
 
         Ok(Self {
-            store,
+            backend,
             catalog_path: db_path.to_string(),
         })
     }
@@ -77,19 +77,19 @@ impl SqliteCatalogManager {
 
 impl CatalogManager for SqliteCatalogManager {
     fn run_migrations(&self) -> Result<()> {
-        block_on(run_migrations::<SqliteMigrationBackend>(self.store.pool()))
+        block_on(run_migrations::<SqliteMigrationBackend>(self.backend.pool()))
     }
 
     fn list_connections(&self) -> Result<Vec<ConnectionInfo>> {
-        block_on(self.store.list_connections())
+        block_on(self.backend.list_connections())
     }
 
     fn add_connection(&self, name: &str, source_type: &str, config_json: &str) -> Result<i32> {
-        block_on(self.store.add_connection(name, source_type, config_json))
+        block_on(self.backend.add_connection(name, source_type, config_json))
     }
 
     fn get_connection(&self, name: &str) -> Result<Option<ConnectionInfo>> {
-        block_on(self.store.get_connection(name))
+        block_on(self.backend.get_connection(name))
     }
 
     fn add_table(
@@ -100,13 +100,13 @@ impl CatalogManager for SqliteCatalogManager {
         arrow_schema_json: &str,
     ) -> Result<i32> {
         block_on(
-            self.store
+            self.backend
                 .add_table(connection_id, schema_name, table_name, arrow_schema_json),
         )
     }
 
     fn list_tables(&self, connection_id: Option<i32>) -> Result<Vec<TableInfo>> {
-        block_on(self.store.list_tables(connection_id))
+        block_on(self.backend.list_tables(connection_id))
     }
 
     fn get_table(
@@ -115,12 +115,12 @@ impl CatalogManager for SqliteCatalogManager {
         schema_name: &str,
         table_name: &str,
     ) -> Result<Option<TableInfo>> {
-        block_on(self.store.get_table(connection_id, schema_name, table_name))
+        block_on(self.backend.get_table(connection_id, schema_name, table_name))
     }
 
     fn update_table_sync(&self, table_id: i32, parquet_path: &str, state_path: &str) -> Result<()> {
         block_on(
-            self.store
+            self.backend
                 .update_table_sync(table_id, parquet_path, state_path),
         )
     }
@@ -132,17 +132,17 @@ impl CatalogManager for SqliteCatalogManager {
         table_name: &str,
     ) -> Result<TableInfo> {
         block_on(
-            self.store
+            self.backend
                 .clear_table_cache_metadata(connection_id, schema_name, table_name),
         )
     }
 
     fn clear_connection_cache_metadata(&self, name: &str) -> Result<()> {
-        block_on(self.store.clear_connection_cache_metadata(name))
+        block_on(self.backend.clear_connection_cache_metadata(name))
     }
 
     fn delete_connection(&self, name: &str) -> Result<()> {
-        block_on(self.store.delete_connection(name))
+        block_on(self.backend.delete_connection(name))
     }
 }
 
