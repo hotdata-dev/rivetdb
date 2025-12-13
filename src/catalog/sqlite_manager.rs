@@ -1,28 +1,33 @@
-use crate::catalog::manager::{CatalogManager, ConnectionInfo, TableInfo};
+use crate::catalog::manager::{block_on, CatalogManager, ConnectionInfo, TableInfo};
 use crate::catalog::migrations::{run_migrations, CatalogMigrations};
 use crate::catalog::store::CatalogStore;
 use anyhow::Result;
 use sqlx::{Sqlite, SqlitePool};
-use std::fmt::Debug;
-use tokio::task::block_in_place;
+use std::fmt::{self, Debug, Formatter};
 
 pub struct SqliteCatalogManager {
     store: CatalogStore<Sqlite>,
     catalog_path: String,
 }
 
+impl Debug for SqliteCatalogManager {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SqliteCatalogManager")
+            .field("catalog_path", &self.catalog_path)
+            .finish()
+    }
+}
+
 struct SqliteMigrationBackend;
 
 impl SqliteCatalogManager {
     pub fn new(db_path: &str) -> Result<Self> {
-        let pool = block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let uri = format!("sqlite:{}?mode=rwc", db_path);
-                let pool = SqlitePool::connect(&uri).await?;
-                Ok::<_, anyhow::Error>(pool)
-            })
-        })?;
+        block_on(Self::new_async(db_path))
+    }
 
+    async fn new_async(db_path: &str) -> Result<Self> {
+        let uri = format!("sqlite:{}?mode=rwc", db_path);
+        let pool = SqlitePool::connect(&uri).await?;
         let store = CatalogStore::new(pool);
 
         Ok(Self {
@@ -31,11 +36,7 @@ impl SqliteCatalogManager {
         })
     }
 
-    async fn run_migrations_async(pool: &SqlitePool) -> Result<()> {
-        run_migrations::<SqliteMigrationBackend>(pool).await
-    }
-
-    async fn sqlite_initialize_schema(pool: &SqlitePool) -> Result<()> {
+    async fn initialize_schema(pool: &SqlitePool) -> Result<()> {
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS connections (
@@ -72,35 +73,23 @@ impl SqliteCatalogManager {
 
         Ok(())
     }
-
-    fn block_on<F, T>(&self, f: F) -> Result<T>
-    where
-        F: std::future::Future<Output = Result<T>>,
-    {
-        block_in_place(|| tokio::runtime::Handle::current().block_on(f))
-    }
 }
 
 impl CatalogManager for SqliteCatalogManager {
-    fn close(&self) -> Result<()> {
-        // sqlx pools do not need explicit close
-        Ok(())
-    }
-
     fn run_migrations(&self) -> Result<()> {
-        self.block_on(Self::run_migrations_async(self.store.pool()))
+        block_on(run_migrations::<SqliteMigrationBackend>(self.store.pool()))
     }
 
     fn list_connections(&self) -> Result<Vec<ConnectionInfo>> {
-        self.block_on(self.store.list_connections())
+        block_on(self.store.list_connections())
     }
 
     fn add_connection(&self, name: &str, source_type: &str, config_json: &str) -> Result<i32> {
-        self.block_on(self.store.add_connection(name, source_type, config_json))
+        block_on(self.store.add_connection(name, source_type, config_json))
     }
 
     fn get_connection(&self, name: &str) -> Result<Option<ConnectionInfo>> {
-        self.block_on(self.store.get_connection(name))
+        block_on(self.store.get_connection(name))
     }
 
     fn add_table(
@@ -110,16 +99,14 @@ impl CatalogManager for SqliteCatalogManager {
         table_name: &str,
         arrow_schema_json: &str,
     ) -> Result<i32> {
-        self.block_on(self.store.add_table(
-            connection_id,
-            schema_name,
-            table_name,
-            arrow_schema_json,
-        ))
+        block_on(
+            self.store
+                .add_table(connection_id, schema_name, table_name, arrow_schema_json),
+        )
     }
 
     fn list_tables(&self, connection_id: Option<i32>) -> Result<Vec<TableInfo>> {
-        self.block_on(self.store.list_tables(connection_id))
+        block_on(self.store.list_tables(connection_id))
     }
 
     fn get_table(
@@ -128,11 +115,11 @@ impl CatalogManager for SqliteCatalogManager {
         schema_name: &str,
         table_name: &str,
     ) -> Result<Option<TableInfo>> {
-        self.block_on(self.store.get_table(connection_id, schema_name, table_name))
+        block_on(self.store.get_table(connection_id, schema_name, table_name))
     }
 
     fn update_table_sync(&self, table_id: i32, parquet_path: &str, state_path: &str) -> Result<()> {
-        self.block_on(
+        block_on(
             self.store
                 .update_table_sync(table_id, parquet_path, state_path),
         )
@@ -144,26 +131,18 @@ impl CatalogManager for SqliteCatalogManager {
         schema_name: &str,
         table_name: &str,
     ) -> Result<TableInfo> {
-        self.block_on(
+        block_on(
             self.store
                 .clear_table_cache_metadata(connection_id, schema_name, table_name),
         )
     }
 
     fn clear_connection_cache_metadata(&self, name: &str) -> Result<()> {
-        self.block_on(self.store.clear_connection_cache_metadata(name))
+        block_on(self.store.clear_connection_cache_metadata(name))
     }
 
     fn delete_connection(&self, name: &str) -> Result<()> {
-        self.block_on(self.store.delete_connection(name))
-    }
-}
-
-impl Debug for SqliteCatalogManager {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SqliteCatalogManager")
-            .field("catalog_path", &self.catalog_path)
-            .finish()
+        block_on(self.store.delete_connection(name))
     }
 }
 
@@ -200,6 +179,6 @@ impl CatalogMigrations for SqliteMigrationBackend {
     }
 
     async fn migrate_v1(pool: &Self::Pool) -> Result<()> {
-        SqliteCatalogManager::sqlite_initialize_schema(pool).await
+        SqliteCatalogManager::initialize_schema(pool).await
     }
 }

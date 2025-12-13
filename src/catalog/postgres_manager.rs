@@ -1,11 +1,10 @@
-use crate::catalog::manager::{CatalogManager, ConnectionInfo, TableInfo};
+use crate::catalog::manager::{block_on, CatalogManager, ConnectionInfo, TableInfo};
 use crate::catalog::migrations::{run_migrations, CatalogMigrations};
 use crate::catalog::store::CatalogStore;
 use anyhow::Result;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Postgres};
 use std::fmt::{self, Debug, Formatter};
-use tokio::task::block_in_place;
 
 pub struct PostgresCatalogManager {
     store: CatalogStore<Postgres>,
@@ -13,33 +12,20 @@ pub struct PostgresCatalogManager {
 
 impl PostgresCatalogManager {
     pub fn new(connection_string: &str) -> Result<Self> {
-        let pool = block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let pool = PgPoolOptions::new()
-                    .max_connections(5)
-                    .connect(connection_string)
-                    .await?;
+        block_on(Self::new_async(connection_string))
+    }
 
-                Ok::<_, anyhow::Error>(pool)
-            })
-        })?;
+    async fn new_async(connection_string: &str) -> Result<Self> {
+        let pool = PgPoolOptions::new()
+            .max_connections(5)
+            .connect(connection_string)
+            .await?;
 
         let store = CatalogStore::new(pool);
         Ok(Self { store })
     }
 
-    fn block_on<F, T>(&self, f: F) -> Result<T>
-    where
-        F: std::future::Future<Output = Result<T>>,
-    {
-        block_in_place(|| tokio::runtime::Handle::current().block_on(f))
-    }
-
-    async fn run_migrations_async(pool: &PgPool) -> Result<()> {
-        run_migrations::<PostgresMigrationBackend>(pool).await
-    }
-
-    async fn postgres_initialize_schema(pool: &PgPool) -> Result<()> {
+    async fn initialize_schema(pool: &PgPool) -> Result<()> {
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS connections (
                 id SERIAL PRIMARY KEY,
@@ -107,30 +93,25 @@ impl CatalogMigrations for PostgresMigrationBackend {
     }
 
     async fn migrate_v1(pool: &Self::Pool) -> Result<()> {
-        PostgresCatalogManager::postgres_initialize_schema(pool).await
+        PostgresCatalogManager::initialize_schema(pool).await
     }
 }
 
 impl CatalogManager for PostgresCatalogManager {
-    fn close(&self) -> Result<()> {
-        // sqlx pool handles connection cleanup automatically
-        Ok(())
-    }
-
     fn run_migrations(&self) -> Result<()> {
-        self.block_on(Self::run_migrations_async(self.store.pool()))
+        block_on(run_migrations::<PostgresMigrationBackend>(self.store.pool()))
     }
 
     fn list_connections(&self) -> Result<Vec<ConnectionInfo>> {
-        self.block_on(self.store.list_connections())
+        block_on(self.store.list_connections())
     }
 
     fn add_connection(&self, name: &str, source_type: &str, config_json: &str) -> Result<i32> {
-        self.block_on(self.store.add_connection(name, source_type, config_json))
+        block_on(self.store.add_connection(name, source_type, config_json))
     }
 
     fn get_connection(&self, name: &str) -> Result<Option<ConnectionInfo>> {
-        self.block_on(self.store.get_connection(name))
+        block_on(self.store.get_connection(name))
     }
 
     fn add_table(
@@ -140,16 +121,14 @@ impl CatalogManager for PostgresCatalogManager {
         table_name: &str,
         arrow_schema_json: &str,
     ) -> Result<i32> {
-        self.block_on(self.store.add_table(
-            connection_id,
-            schema_name,
-            table_name,
-            arrow_schema_json,
-        ))
+        block_on(
+            self.store
+                .add_table(connection_id, schema_name, table_name, arrow_schema_json),
+        )
     }
 
     fn list_tables(&self, connection_id: Option<i32>) -> Result<Vec<TableInfo>> {
-        self.block_on(self.store.list_tables(connection_id))
+        block_on(self.store.list_tables(connection_id))
     }
 
     fn get_table(
@@ -158,11 +137,11 @@ impl CatalogManager for PostgresCatalogManager {
         schema_name: &str,
         table_name: &str,
     ) -> Result<Option<TableInfo>> {
-        self.block_on(self.store.get_table(connection_id, schema_name, table_name))
+        block_on(self.store.get_table(connection_id, schema_name, table_name))
     }
 
     fn update_table_sync(&self, table_id: i32, parquet_path: &str, state_path: &str) -> Result<()> {
-        self.block_on(
+        block_on(
             self.store
                 .update_table_sync(table_id, parquet_path, state_path),
         )
@@ -174,18 +153,18 @@ impl CatalogManager for PostgresCatalogManager {
         schema_name: &str,
         table_name: &str,
     ) -> Result<TableInfo> {
-        self.block_on(
+        block_on(
             self.store
                 .clear_table_cache_metadata(connection_id, schema_name, table_name),
         )
     }
 
     fn clear_connection_cache_metadata(&self, name: &str) -> Result<()> {
-        self.block_on(self.store.clear_connection_cache_metadata(name))
+        block_on(self.store.clear_connection_cache_metadata(name))
     }
 
     fn delete_connection(&self, name: &str) -> Result<()> {
-        self.block_on(self.store.delete_connection(name))
+        block_on(self.store.delete_connection(name))
     }
 }
 
