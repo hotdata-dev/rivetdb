@@ -1,8 +1,10 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use sqlx::FromRow;
 use std::fmt::Debug;
+use tokio::task::block_in_place;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct ConnectionInfo {
     pub id: i32,
     pub name: String,
@@ -10,7 +12,7 @@ pub struct ConnectionInfo {
     pub config_json: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct TableInfo {
     pub id: i32,
     pub connection_id: i32,
@@ -22,10 +24,30 @@ pub struct TableInfo {
     pub arrow_schema_json: Option<String>,
 }
 
+/// Blocking helper for async operations.
+///
+/// Uses `block_in_place` to avoid blocking the tokio runtime when calling
+/// async code from a sync context.
+pub fn block_on<F, T>(f: F) -> Result<T>
+where
+    F: std::future::Future<Output = Result<T>>,
+{
+    block_in_place(|| tokio::runtime::Handle::current().block_on(f))
+}
+
+/// Synchronous interface for catalog operations.
+///
+/// This trait uses blocking methods for compatibility with `dyn` trait objects.
+/// Implementations should use [`block_on`] to wrap async database operations.
 pub trait CatalogManager: Debug + Send + Sync {
     /// Close the catalog connection. This is idempotent and can be called multiple times.
-    /// After closing, all operations on this catalog will return an error.
-    fn close(&self) -> Result<()>;
+    fn close(&self) -> Result<()> {
+        // Default implementation does nothing - sqlx pools handle cleanup automatically
+        Ok(())
+    }
+
+    /// Apply any pending schema migrations. Should be idempotent.
+    fn run_migrations(&self) -> Result<()>;
 
     fn list_connections(&self) -> Result<Vec<ConnectionInfo>>;
     fn add_connection(&self, name: &str, source_type: &str, config_json: &str) -> Result<i32>;
@@ -47,7 +69,6 @@ pub trait CatalogManager: Debug + Send + Sync {
     fn update_table_sync(&self, table_id: i32, parquet_path: &str, state_path: &str) -> Result<()>;
 
     /// Clear table cache metadata (set paths to NULL) without deleting files.
-    /// This should be called before re-registering the catalog to avoid file handle issues.
     fn clear_table_cache_metadata(
         &self,
         connection_id: i32,
@@ -56,10 +77,8 @@ pub trait CatalogManager: Debug + Send + Sync {
     ) -> Result<TableInfo>;
 
     /// Clear cache metadata for all tables in a connection (set paths to NULL).
-    /// This is metadata-only; file deletion should be handled by the engine.
     fn clear_connection_cache_metadata(&self, name: &str) -> Result<()>;
 
     /// Delete connection and all associated table rows from metadata.
-    /// This is metadata-only; file deletion should be handled by the engine.
     fn delete_connection(&self, name: &str) -> Result<()>;
 }

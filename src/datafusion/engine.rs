@@ -1,5 +1,5 @@
 use super::catalog_provider::HotDataCatalogProvider;
-use crate::catalog::{CatalogManager, ConnectionInfo, DuckdbCatalogManager, TableInfo};
+use crate::catalog::{CatalogManager, ConnectionInfo, SqliteCatalogManager, TableInfo};
 use crate::datafetch::DataFetcher;
 use crate::source::Source;
 use crate::storage::{FilesystemStorage, StorageManager};
@@ -49,9 +49,10 @@ impl HotDataEngine {
     pub fn new_with_storage(
         catalog_path: &str,
         storage: Arc<dyn StorageManager>,
-        readonly: bool,
+        _readonly: bool,
     ) -> Result<Self> {
-        let catalog = DuckdbCatalogManager::new_readonly(catalog_path, readonly)?;
+        let catalog = SqliteCatalogManager::new(catalog_path)?;
+        catalog.run_migrations()?;
 
         let df_ctx = SessionContext::new();
 
@@ -114,7 +115,7 @@ impl HotDataEngine {
         &self.storage
     }
 
-    /// Register all connections from the DuckDB catalog as DataFusion catalogs.
+    /// Register all connections from the catalog store as DataFusion catalogs.
     fn register_existing_connections(&mut self) -> Result<()> {
         let connections = self.catalog.list_connections()?;
 
@@ -318,7 +319,7 @@ impl HotDataEngine {
 
         // Note: DataFusion doesn't support deregistering catalogs in v50.3.0
         // The catalog will remain registered but will return no schemas/tables
-        // since the DuckDB catalog has been cleaned up
+        // since the metadata catalog has been cleaned up
 
         Ok(())
     }
@@ -414,6 +415,8 @@ impl HotDataEngineBuilder {
             .storage
             .ok_or_else(|| anyhow::anyhow!("Storage manager not set"))?;
 
+        catalog.run_migrations()?;
+
         // Create DataFusion session context
         let df_ctx = SessionContext::new();
 
@@ -441,7 +444,7 @@ impl HotDataEngine {
     /// Create a new engine from application configuration.
     /// This is a convenience method that sets up catalog and storage based on the config.
     pub fn from_config(config: &crate::config::AppConfig) -> Result<Self> {
-        // Determine metadata directory
+        // Determine metadata directory root (defaults to ~/.hotdata/rivetdb)
         let metadata_dir = if let Some(cache_dir) = &config.paths.cache_dir {
             PathBuf::from(cache_dir)
                 .parent()
@@ -460,18 +463,33 @@ impl HotDataEngine {
             PathBuf::from(home).join(".hotdata").join("rivetdb")
         };
 
-        // Create metadata directory if it doesn't exist
+        // Default cache/state directories live under metadata dir unless explicitly set
+        let cache_dir_path = config
+            .paths
+            .cache_dir
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| metadata_dir.join("cache"));
+        let state_dir_path = config
+            .paths
+            .state_dir
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| metadata_dir.join("state"));
+
+        // Ensure directories exist before using them
         std::fs::create_dir_all(&metadata_dir)?;
+        std::fs::create_dir_all(&cache_dir_path)?;
+        std::fs::create_dir_all(&state_dir_path)?;
 
         // Create catalog manager based on config
         let catalog: Arc<dyn CatalogManager> = match config.catalog.catalog_type.as_str() {
-            "duckdb" => {
+            "sqlite" => {
                 let catalog_path = metadata_dir.join("catalog.db");
-                Arc::new(DuckdbCatalogManager::new_readonly(
+                Arc::new(SqliteCatalogManager::new(
                     catalog_path
                         .to_str()
                         .ok_or_else(|| anyhow::anyhow!("Invalid catalog path"))?,
-                    false,
                 )?)
             }
             "postgres" => {
@@ -512,9 +530,13 @@ impl HotDataEngine {
         // Create storage manager based on config
         let storage: Arc<dyn StorageManager> = match config.storage.storage_type.as_str() {
             "filesystem" => {
-                let cache_dir = config.paths.cache_dir.as_deref().unwrap_or("cache");
-                let state_dir = config.paths.state_dir.as_deref().unwrap_or("state");
-                Arc::new(FilesystemStorage::new(cache_dir, state_dir))
+                let cache_dir_str = cache_dir_path
+                    .to_str()
+                    .ok_or_else(|| anyhow::anyhow!("Invalid cache directory path"))?;
+                let state_dir_str = state_dir_path
+                    .to_str()
+                    .ok_or_else(|| anyhow::anyhow!("Invalid state directory path"))?;
+                Arc::new(FilesystemStorage::new(cache_dir_str, state_dir_str))
             }
             "s3" => {
                 let bucket = config
@@ -565,16 +587,14 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    #[test]
-    fn test_builder_pattern() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_builder_pattern() {
         let temp_dir = TempDir::new().unwrap();
         let metadata_dir = temp_dir.path().to_path_buf();
         let catalog_path = metadata_dir.join("catalog.db");
 
         // Create catalog and storage
-        let catalog = Arc::new(
-            DuckdbCatalogManager::new_readonly(catalog_path.to_str().unwrap(), false).unwrap(),
-        );
+        let catalog = Arc::new(SqliteCatalogManager::new(catalog_path.to_str().unwrap()).unwrap());
 
         let storage = Arc::new(FilesystemStorage::new(
             temp_dir.path().join("cache").to_str().unwrap(),
@@ -619,8 +639,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_from_config_duckdb_filesystem() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_from_config_sqlite_filesystem() {
         use crate::config::{AppConfig, CatalogConfig, PathsConfig, ServerConfig, StorageConfig};
 
         let temp_dir = TempDir::new().unwrap();
@@ -633,7 +653,7 @@ mod tests {
                 port: 3000,
             },
             catalog: CatalogConfig {
-                catalog_type: "duckdb".to_string(),
+                catalog_type: "sqlite".to_string(),
                 host: None,
                 port: None,
                 database: None,

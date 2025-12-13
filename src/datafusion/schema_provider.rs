@@ -56,7 +56,7 @@ impl SchemaProvider for HotDataSchemaProvider {
     }
 
     fn table_names(&self) -> Vec<String> {
-        // Return all known tables from DuckDB catalog
+        // Return all known tables from the catalog store
         match self.catalog.list_tables(Some(self.connection_id)) {
             Ok(tables) => tables
                 .into_iter()
@@ -124,7 +124,7 @@ impl SchemaProvider for HotDataSchemaProvider {
     }
 
     fn table_exist(&self, name: &str) -> bool {
-        // Check DuckDB catalog
+        // Check the catalog metadata store
         matches!(
             self.catalog
                 .get_table(self.connection_id, &self.schema_name, name),
