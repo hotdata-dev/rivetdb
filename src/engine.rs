@@ -8,7 +8,7 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::catalog::CatalogProvider;
 use datafusion::prelude::*;
 use log::{info, warn};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::error;
@@ -526,7 +526,7 @@ impl RivetEngineBuilder {
     }
 
     /// Resolve the cache directory, using default if not set.
-    fn resolve_cache_dir(&self, base_dir: &PathBuf) -> PathBuf {
+    fn resolve_cache_dir(&self, base_dir: &Path) -> PathBuf {
         self.cache_dir
             .clone()
             .unwrap_or_else(|| base_dir.join("cache"))
