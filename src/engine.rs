@@ -1,6 +1,6 @@
 use crate::catalog::{CatalogManager, ConnectionInfo, SqliteCatalogManager, TableInfo};
-use crate::datafusion::{block_on, RivetCatalogProvider};
 use crate::datafetch::DataFetcher;
+use crate::datafusion::{block_on, RivetCatalogProvider};
 use crate::source::Source;
 use crate::storage::{FilesystemStorage, StorageManager};
 use anyhow::Result;

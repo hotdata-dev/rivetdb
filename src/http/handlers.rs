@@ -1,4 +1,3 @@
-use crate::RivetEngine;
 use crate::http::error::ApiError;
 use crate::http::models::{
     ConnectionInfo, CreateConnectionRequest, CreateConnectionResponse, GetConnectionResponse,
@@ -6,6 +5,7 @@ use crate::http::models::{
 };
 use crate::http::serialization::{encode_value_at, make_array_encoder};
 use crate::source::Source;
+use crate::RivetEngine;
 use axum::{
     extract::{Path, Query as QueryParams, State},
     http::StatusCode,

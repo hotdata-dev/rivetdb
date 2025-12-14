@@ -1,8 +1,8 @@
 use anyhow::Result;
 use clap::Parser;
 use rivetdb::config::AppConfig;
-use rivetdb::RivetEngine;
 use rivetdb::http::app_server::AppServer;
+use rivetdb::RivetEngine;
 use std::time::Instant;
 
 #[derive(Parser)]

@@ -10,9 +10,9 @@ use axum::{
     http::{Request, StatusCode},
     Router,
 };
-use rivetdb::RivetEngine;
 use rivetdb::http::app_server::{AppServer, PATH_CONNECTIONS, PATH_QUERY, PATH_TABLES};
 use rivetdb::source::Source;
+use rivetdb::RivetEngine;
 use serde_json::json;
 use std::sync::Arc;
 use tempfile::TempDir;

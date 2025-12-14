@@ -1,9 +1,9 @@
-use crate::RivetEngine;
 use crate::http::handlers::{
     create_connection_handler, delete_connection_handler, get_connection_handler, health_handler,
     list_connections_handler, purge_connection_cache_handler, purge_table_cache_handler,
     query_handler, tables_handler,
 };
+use crate::RivetEngine;
 use axum::routing::{delete, get, post};
 use axum::Router;
 use std::sync::Arc;
