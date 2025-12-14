@@ -60,7 +60,7 @@ macro_rules! catalog_manager_tests {
         mod $module {
             use super::*;
 
-            #[tokio::test(flavor = "multi_thread")]
+            #[tokio::test]
             async fn catalog_initialization() {
                 let ctx = super::$setup_fn().await;
                 let catalog = ctx.manager();
@@ -69,7 +69,7 @@ macro_rules! catalog_manager_tests {
                 assert!(connections.is_empty());
             }
 
-            #[tokio::test(flavor = "multi_thread")]
+            #[tokio::test]
             async fn add_connection() {
                 let ctx = super::$setup_fn().await;
                 let catalog = ctx.manager();
@@ -85,7 +85,7 @@ macro_rules! catalog_manager_tests {
                 assert_eq!(connections[0].name, "test_db");
             }
 
-            #[tokio::test(flavor = "multi_thread")]
+            #[tokio::test]
             async fn get_connection() {
                 let ctx = super::$setup_fn().await;
                 let catalog = ctx.manager();
@@ -104,7 +104,7 @@ macro_rules! catalog_manager_tests {
                 assert!(missing.is_none());
             }
 
-            #[tokio::test(flavor = "multi_thread")]
+            #[tokio::test]
             async fn add_table() {
                 let ctx = super::$setup_fn().await;
                 let catalog = ctx.manager();
@@ -126,7 +126,7 @@ macro_rules! catalog_manager_tests {
                 assert_eq!(first_id, second_id);
             }
 
-            #[tokio::test(flavor = "multi_thread")]
+            #[tokio::test]
             async fn get_table() {
                 let ctx = super::$setup_fn().await;
                 let catalog = ctx.manager();
@@ -155,7 +155,7 @@ macro_rules! catalog_manager_tests {
                 assert!(missing.is_none());
             }
 
-            #[tokio::test(flavor = "multi_thread")]
+            #[tokio::test]
             async fn update_table_sync() {
                 let ctx = super::$setup_fn().await;
                 let catalog = ctx.manager();
@@ -184,7 +184,7 @@ macro_rules! catalog_manager_tests {
                 assert!(table.last_sync.is_some());
             }
 
-            #[tokio::test(flavor = "multi_thread")]
+            #[tokio::test]
             async fn list_tables_multiple_connections() {
                 let ctx = super::$setup_fn().await;
                 let catalog = ctx.manager();
@@ -229,7 +229,7 @@ macro_rules! catalog_manager_tests {
                 assert!(conn2_tables.iter().all(|t| t.connection_id == conn2));
             }
 
-            #[tokio::test(flavor = "multi_thread")]
+            #[tokio::test]
             async fn list_tables_with_cached_status() {
                 let ctx = super::$setup_fn().await;
                 let catalog = ctx.manager();
@@ -274,7 +274,7 @@ macro_rules! catalog_manager_tests {
                 assert!(not_cached.last_sync.is_none());
             }
 
-            #[tokio::test(flavor = "multi_thread")]
+            #[tokio::test]
             async fn clear_connection_cache_metadata() {
                 let ctx = super::$setup_fn().await;
                 let catalog = ctx.manager();
@@ -308,7 +308,7 @@ macro_rules! catalog_manager_tests {
                 assert!(table.last_sync.is_none());
             }
 
-            #[tokio::test(flavor = "multi_thread")]
+            #[tokio::test]
             async fn delete_connection() {
                 let ctx = super::$setup_fn().await;
                 let catalog = ctx.manager();
@@ -340,7 +340,7 @@ macro_rules! catalog_manager_tests {
                     .is_none());
             }
 
-            #[tokio::test(flavor = "multi_thread")]
+            #[tokio::test]
             async fn clear_nonexistent_connection() {
                 let ctx = super::$setup_fn().await;
                 let catalog = ctx.manager();
@@ -349,7 +349,7 @@ macro_rules! catalog_manager_tests {
                 assert!(err.unwrap_err().to_string().contains("not found"));
             }
 
-            #[tokio::test(flavor = "multi_thread")]
+            #[tokio::test]
             async fn delete_nonexistent_connection() {
                 let ctx = super::$setup_fn().await;
                 let catalog = ctx.manager();
@@ -358,7 +358,7 @@ macro_rules! catalog_manager_tests {
                 assert!(err.unwrap_err().to_string().contains("not found"));
             }
 
-            #[tokio::test(flavor = "multi_thread")]
+            #[tokio::test]
             async fn clear_table_cache_metadata() {
                 let ctx = super::$setup_fn().await;
                 let catalog = ctx.manager();
@@ -410,7 +410,7 @@ macro_rules! catalog_manager_tests {
                 assert!(orders_after.state_path.is_some());
             }
 
-            #[tokio::test(flavor = "multi_thread")]
+            #[tokio::test]
             async fn clear_table_cache_metadata_nonexistent() {
                 let ctx = super::$setup_fn().await;
                 let catalog = ctx.manager();
@@ -428,7 +428,7 @@ macro_rules! catalog_manager_tests {
                 assert!(err.unwrap_err().to_string().contains("not found"));
             }
 
-            #[tokio::test(flavor = "multi_thread")]
+            #[tokio::test]
             async fn clear_table_without_cache() {
                 let ctx = super::$setup_fn().await;
                 let catalog = ctx.manager();
@@ -460,7 +460,7 @@ macro_rules! catalog_manager_tests {
                 assert!(table_after.last_sync.is_none());
             }
 
-            #[tokio::test(flavor = "multi_thread")]
+            #[tokio::test]
             async fn close_is_idempotent() {
                 let ctx = super::$setup_fn().await;
                 let catalog = ctx.manager();

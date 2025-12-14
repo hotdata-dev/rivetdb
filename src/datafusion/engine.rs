@@ -637,7 +637,7 @@ mod tests {
         );
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test]
     async fn test_builder_pattern_missing_fields() {
         // Test that builder fails when required fields are missing
         let temp_dir = TempDir::new().unwrap();
