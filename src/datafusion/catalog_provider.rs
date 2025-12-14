@@ -1,5 +1,5 @@
 use super::schema_provider::HotDataSchemaProvider;
-use crate::catalog::CatalogManager;
+use crate::catalog::{block_on, CatalogManager};
 use crate::datafetch::{DataFetcher, NativeFetcher};
 use crate::source::Source;
 use crate::storage::StorageManager;
@@ -83,7 +83,8 @@ impl CatalogProvider for HotDataCatalogProvider {
 
     fn schema_names(&self) -> Vec<String> {
         // Return schema names tracked in the catalog store for this connection
-        match self.catalog.list_tables(Some(self.connection_id)) {
+        // Uses block_on since CatalogProvider trait methods are sync
+        match block_on(self.catalog.list_tables(Some(self.connection_id))) {
             Ok(tables) => {
                 let mut schemas: Vec<String> = tables
                     .into_iter()
@@ -100,7 +101,8 @@ impl CatalogProvider for HotDataCatalogProvider {
 
     fn schema(&self, name: &str) -> Option<Arc<dyn SchemaProvider>> {
         // Check if this schema exists in our catalog
-        let schema_exists = match self.catalog.list_tables(Some(self.connection_id)) {
+        // Uses block_on since CatalogProvider trait methods are sync
+        let schema_exists = match block_on(self.catalog.list_tables(Some(self.connection_id))) {
             Ok(tables) => tables.iter().any(|t| t.schema_name == name),
             Err(_) => false,
         };
