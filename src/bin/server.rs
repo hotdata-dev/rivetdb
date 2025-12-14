@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 use rivetdb::config::AppConfig;
-use rivetdb::datafusion::HotDataEngine;
+use rivetdb::RivetEngine;
 use rivetdb::http::app_server::AppServer;
 use std::time::Instant;
 
@@ -34,7 +34,7 @@ async fn main() -> Result<()> {
     tracing::info!("Configuration '{}' loaded successfully", &cli.config);
 
     // Initialize engine from config
-    let engine = HotDataEngine::from_config(&config).await?;
+    let engine = RivetEngine::from_config(&config).await?;
 
     tracing::info!("Engine initialized");
 
