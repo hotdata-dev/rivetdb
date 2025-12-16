@@ -1,6 +1,7 @@
 use crate::catalog::{CatalogManager, ConnectionInfo, SqliteCatalogManager, TableInfo};
 use crate::datafetch::{DataFetcher, FetchOrchestrator, NativeFetcher};
 use crate::datafusion::{block_on, RivetCatalogProvider};
+use crate::secrets::{EncryptedSecretManager, SecretManager};
 use crate::source::Source;
 use crate::storage::{FilesystemStorage, StorageManager};
 use anyhow::Result;
@@ -24,6 +25,7 @@ pub struct RivetEngine {
     df_ctx: SessionContext,
     storage: Arc<dyn StorageManager>,
     orchestrator: Arc<FetchOrchestrator>,
+    secret_manager: Option<Arc<dyn SecretManager>>,
 }
 
 impl RivetEngine {
@@ -187,6 +189,11 @@ impl RivetEngine {
     /// Get a reference to the storage manager
     pub fn storage(&self) -> &Arc<dyn StorageManager> {
         &self.storage
+    }
+
+    /// Get a reference to the secret manager, if configured.
+    pub fn secret_manager(&self) -> Option<&Arc<dyn SecretManager>> {
+        self.secret_manager.as_ref()
     }
 
     /// Register all connections from the catalog store as DataFusion catalogs.
@@ -583,11 +590,33 @@ impl RivetEngineBuilder {
             catalog.clone(),
         ));
 
+        // Step 7: Initialize secret manager from environment
+        let secret_manager: Option<Arc<dyn SecretManager>> =
+            match std::env::var("RIVETDB_SECRET_KEY") {
+                Ok(key) => {
+                    match EncryptedSecretManager::from_base64_key(&key, catalog.clone()) {
+                        Ok(manager) => {
+                            info!("Secret manager initialized");
+                            Some(Arc::new(manager))
+                        }
+                        Err(e) => {
+                            warn!("Failed to initialize secret manager: {}", e);
+                            None
+                        }
+                    }
+                }
+                Err(_) => {
+                    info!("RIVETDB_SECRET_KEY not set, secret manager disabled");
+                    None
+                }
+            };
+
         let mut engine = RivetEngine {
             catalog,
             df_ctx,
             storage,
             orchestrator,
+            secret_manager,
         };
 
         // Register all existing connections as DataFusion catalogs
