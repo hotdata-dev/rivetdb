@@ -3898,6 +3898,7 @@ dependencies = [
  "log",
  "object_store",
  "proptest",
+ "rand 0.8.5",
  "rustyline",
  "serde",
  "serde_json",
