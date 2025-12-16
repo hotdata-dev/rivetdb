@@ -4,13 +4,17 @@ use duckdb::Connection;
 use std::collections::HashMap;
 
 use crate::datafetch::{ColumnMetadata, DataFetchError, TableMetadata};
-use crate::source::Source;
+use crate::secrets::SecretManager;
+use crate::source::{ResolvedCredential, Source};
 
 use super::StreamingParquetWriter;
 
 /// Discover tables and columns from DuckDB/MotherDuck
-pub async fn discover_tables(source: &Source) -> Result<Vec<TableMetadata>, DataFetchError> {
-    let connection_string = source.connection_string();
+pub async fn discover_tables(
+    source: &Source,
+    secrets: Option<&dyn SecretManager>,
+) -> Result<Vec<TableMetadata>, DataFetchError> {
+    let connection_string = resolve_connection_string(source, secrets).await?;
     let catalog = source.catalog().map(|s| s.to_string());
 
     tokio::task::spawn_blocking(move || {
@@ -18,6 +22,25 @@ pub async fn discover_tables(source: &Source) -> Result<Vec<TableMetadata>, Data
     })
     .await
     .map_err(|e| DataFetchError::Connection(e.to_string()))?
+}
+
+/// Resolve credentials and build connection string
+async fn resolve_connection_string(
+    source: &Source,
+    secrets: Option<&dyn SecretManager>,
+) -> Result<String, DataFetchError> {
+    match secrets {
+        Some(mgr) => source
+            .with_resolved_credential(mgr, |cred| source.connection_string(cred))
+            .await
+            .map_err(|e| DataFetchError::Connection(e.to_string())),
+        None => {
+            // No secret manager - only works for sources that don't need credentials
+            source
+                .connection_string(ResolvedCredential::None)
+                .map_err(|e| DataFetchError::Connection(e.to_string()))
+        }
+    }
 }
 
 fn discover_tables_sync(
@@ -107,6 +130,7 @@ enum FetchMessage {
 /// Fetch table data and write to Parquet using streaming to avoid OOM on large tables
 pub async fn fetch_table(
     source: &Source,
+    secrets: Option<&dyn SecretManager>,
     _catalog: Option<&str>,
     schema: &str,
     table: &str,
@@ -115,7 +139,7 @@ pub async fn fetch_table(
     use datafusion::arrow::record_batch::RecordBatch;
     use std::sync::Arc;
 
-    let connection_string = source.connection_string();
+    let connection_string = resolve_connection_string(source, secrets).await?;
     let schema = schema.to_string();
     let table = table.to_string();
 
