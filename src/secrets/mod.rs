@@ -244,19 +244,27 @@ impl SecretManager {
             .map_err(|e| SecretError::Database(e.to_string()))?
             .ok_or_else(|| SecretError::NotFound(normalized.clone()))?;
 
-        // Delete metadata
-        let _ = self
-            .catalog
-            .delete_secret_metadata(&normalized)
-            .await
-            .map_err(|e| SecretError::Database(e.to_string()))?;
-
-        // Delete from backend using provider_ref from metadata
+        // Delete from backend first using provider_ref from metadata
         let record = SecretRecord {
-            name: normalized,
+            name: normalized.clone(),
             provider_ref: metadata.provider_ref,
         };
-        let _ = self.backend.delete(&record).await;
+
+        if let Err(e) = self.backend.delete(&record).await {
+            tracing::error!(secret = %normalized, error = %e, "Failed to delete secret from backend");
+            return Err(e.into());
+        }
+
+        // Backend succeeded, now delete metadata
+        if let Err(e) = self.catalog.delete_secret_metadata(&normalized).await {
+            // Backend value is gone but metadata remains - log but don't fail
+            // The secret is effectively deleted (value gone), metadata is orphaned
+            tracing::warn!(
+                secret = %normalized,
+                error = %e,
+                "Secret value deleted but failed to remove metadata"
+            );
+        }
 
         Ok(())
     }
