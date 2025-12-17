@@ -5,17 +5,30 @@ use axum::{
     http::{Request, StatusCode},
     Router,
 };
+use base64::{engine::general_purpose::STANDARD, Engine};
+use rand::RngCore;
 use rivetdb::http::app_server::{AppServer, PATH_CONNECTIONS, PATH_QUERY, PATH_TABLES};
 use rivetdb::RivetEngine;
 use serde_json::json;
 use tempfile::TempDir;
 use tower::util::ServiceExt;
 
+/// Generate a test secret key (base64-encoded 32 bytes)
+fn generate_test_secret_key() -> String {
+    let mut key = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut key);
+    STANDARD.encode(key)
+}
+
 /// Create test router with in-memory engine
 async fn setup_test() -> Result<(Router, TempDir)> {
     let temp_dir = tempfile::tempdir()?;
 
-    let engine = RivetEngine::defaults(temp_dir.path()).await?;
+    let engine = RivetEngine::builder()
+        .base_dir(temp_dir.path())
+        .secret_key(generate_test_secret_key())
+        .build()
+        .await?;
 
     let app = AppServer::new(engine);
 

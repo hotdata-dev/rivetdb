@@ -334,9 +334,7 @@ pub async fn create_secret_handler(
     State(engine): State<Arc<RivetEngine>>,
     Json(request): Json<CreateSecretRequest>,
 ) -> Result<(StatusCode, Json<CreateSecretResponse>), ApiError> {
-    let secret_manager = engine
-        .secret_manager()
-        .ok_or_else(|| ApiError::service_unavailable("Secret manager not configured"))?;
+    let secret_manager = engine.secret_manager();
 
     secret_manager
         .put(&request.name, request.value.as_bytes())
@@ -357,9 +355,7 @@ pub async fn create_secret_handler(
 pub async fn list_secrets_handler(
     State(engine): State<Arc<RivetEngine>>,
 ) -> Result<Json<ListSecretsResponse>, ApiError> {
-    let secret_manager = engine
-        .secret_manager()
-        .ok_or_else(|| ApiError::service_unavailable("Secret manager not configured"))?;
+    let secret_manager = engine.secret_manager();
 
     let secrets = secret_manager.list().await?;
 
@@ -376,9 +372,7 @@ pub async fn get_secret_handler(
     State(engine): State<Arc<RivetEngine>>,
     Path(name): Path<String>,
 ) -> Result<Json<GetSecretResponse>, ApiError> {
-    let secret_manager = engine
-        .secret_manager()
-        .ok_or_else(|| ApiError::service_unavailable("Secret manager not configured"))?;
+    let secret_manager = engine.secret_manager();
 
     let metadata = secret_manager.get_metadata(&name).await?;
 
@@ -394,9 +388,7 @@ pub async fn delete_secret_handler(
     State(engine): State<Arc<RivetEngine>>,
     Path(name): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    let secret_manager = engine
-        .secret_manager()
-        .ok_or_else(|| ApiError::service_unavailable("Secret manager not configured"))?;
+    let secret_manager = engine.secret_manager();
 
     secret_manager.delete(&name).await?;
 

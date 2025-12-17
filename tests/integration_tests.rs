@@ -527,8 +527,7 @@ impl TestHarness {
 
     /// Store a secret for use in connection credentials.
     async fn store_secret(&self, name: &str, value: &str) {
-        let secret_manager = self.engine_executor.engine.secret_manager()
-            .expect("Secret manager should be initialized for tests");
+        let secret_manager = self.engine_executor.engine.secret_manager();
         secret_manager.put(name, value.as_bytes()).await
             .expect("Failed to store test secret");
     }

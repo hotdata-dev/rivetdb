@@ -25,7 +25,7 @@ pub struct RivetEngine {
     df_ctx: SessionContext,
     storage: Arc<dyn StorageManager>,
     orchestrator: Arc<FetchOrchestrator>,
-    secret_manager: Option<Arc<dyn SecretManager>>,
+    secret_manager: Arc<dyn SecretManager>,
 }
 
 impl RivetEngine {
@@ -192,8 +192,8 @@ impl RivetEngine {
     }
 
     /// Get a reference to the secret manager, if configured.
-    pub fn secret_manager(&self) -> Option<&Arc<dyn SecretManager>> {
-        self.secret_manager.as_ref()
+    pub fn secret_manager(&self) -> &Arc<dyn SecretManager> {
+        &self.secret_manager
     }
 
     /// Register all connections from the catalog store as DataFusion catalogs.
@@ -225,7 +225,7 @@ impl RivetEngine {
         info!("Discovering tables for {} source...", source_type);
         let fetcher = crate::datafetch::NativeFetcher::new();
         let tables = fetcher
-            .discover_tables(&source, self.secret_manager.as_deref())
+            .discover_tables(&source, Some(&*self.secret_manager))
             .await
             .map_err(|e| anyhow::anyhow!("Discovery failed: {}", e))?;
 
@@ -527,7 +527,7 @@ impl RivetEngineBuilder {
 
     /// Set the encryption key for the secret manager (base64-encoded 32-byte key).
     /// If not set, falls back to RIVETDB_SECRET_KEY environment variable.
-    /// If neither is set, the secret manager will be disabled.
+    /// The secret key is required - build() will fail if neither is set.
     pub fn secret_key(mut self, key: impl Into<String>) -> Self {
         self.secret_key = Some(key.into());
         self
@@ -592,25 +592,19 @@ impl RivetEngineBuilder {
         let df_ctx = SessionContext::new();
         storage.register_with_datafusion(&df_ctx)?;
 
-        // Step 6: Initialize secret manager from builder config (which defaults from env var)
-        let secret_manager: Option<Arc<dyn SecretManager>> = match self.secret_key {
-            Some(key) => {
-                match EncryptedSecretManager::from_base64_key(&key, catalog.clone()) {
-                    Ok(manager) => {
-                        info!("Secret manager initialized");
-                        Some(Arc::new(manager))
-                    }
-                    Err(e) => {
-                        warn!("Failed to initialize secret manager: {}", e);
-                        None
-                    }
-                }
-            }
-            None => {
-                info!("No secret key configured, secret manager disabled");
-                None
-            }
-        };
+        // Step 6: Initialize secret manager (required)
+        let secret_key = self.secret_key.ok_or_else(|| {
+            anyhow::anyhow!(
+                "RIVETDB_SECRET_KEY environment variable is required. \
+                Generate one with: openssl rand -base64 32"
+            )
+        })?;
+
+        let secret_manager: Arc<dyn SecretManager> = Arc::new(
+            EncryptedSecretManager::from_base64_key(&secret_key, catalog.clone())
+                .map_err(|e| anyhow::anyhow!("Invalid secret key: {}", e))?,
+        );
+        info!("Secret manager initialized");
 
         // Step 7: Create fetch orchestrator (needs secret_manager)
         let fetcher = Arc::new(NativeFetcher::new());
@@ -641,6 +635,15 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    /// Generate a test secret key (base64-encoded 32 bytes)
+    fn test_secret_key() -> String {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        use rand::RngCore;
+        let mut key = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut key);
+        STANDARD.encode(key)
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn test_builder_pattern() {
         let temp_dir = TempDir::new().unwrap();
@@ -663,6 +666,7 @@ mod tests {
             .base_dir(base_dir.clone())
             .catalog(catalog)
             .storage(storage)
+            .secret_key(test_secret_key())
             .build()
             .await;
 
@@ -686,6 +690,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let result = RivetEngine::builder()
             .base_dir(temp_dir.path().to_path_buf())
+            .secret_key(test_secret_key())
             .build()
             .await;
         assert!(
@@ -700,19 +705,31 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_defaults_constructor() {
-        // Test the defaults() convenience constructor
+    async fn test_builder_fails_without_secret_key() {
+        // Test that builder fails when no secret key is provided
         let temp_dir = TempDir::new().unwrap();
-        let engine = RivetEngine::defaults(temp_dir.path().to_path_buf()).await;
-        assert!(
-            engine.is_ok(),
-            "defaults() should create engine: {:?}",
-            engine.err()
-        );
 
-        let engine = engine.unwrap();
-        let connections = engine.list_connections().await;
-        assert!(connections.is_ok(), "Should be able to list connections");
+        // Temporarily clear the env var if set
+        let old_key = std::env::var("RIVETDB_SECRET_KEY").ok();
+        std::env::remove_var("RIVETDB_SECRET_KEY");
+
+        let result = RivetEngine::builder()
+            .base_dir(temp_dir.path().to_path_buf())
+            .build()
+            .await;
+
+        // Restore env var if it was set
+        if let Some(key) = old_key {
+            std::env::set_var("RIVETDB_SECRET_KEY", key);
+        }
+
+        assert!(result.is_err(), "Builder should fail without secret key");
+        let err_msg = result.err().unwrap().to_string();
+        assert!(
+            err_msg.contains("RIVETDB_SECRET_KEY"),
+            "Error should mention RIVETDB_SECRET_KEY: {}",
+            err_msg
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -721,6 +738,9 @@ mod tests {
 
         let temp_dir = TempDir::new().unwrap();
         let base_dir = temp_dir.path().to_path_buf();
+
+        // Set secret key for this test
+        std::env::set_var("RIVETDB_SECRET_KEY", test_secret_key());
 
         let config = AppConfig {
             server: ServerConfig {
@@ -750,7 +770,8 @@ mod tests {
         let engine = RivetEngine::from_config(&config).await;
         assert!(
             engine.is_ok(),
-            "from_config should create engine successfully"
+            "from_config should create engine successfully: {:?}",
+            engine.err()
         );
 
         let engine = engine.unwrap();
