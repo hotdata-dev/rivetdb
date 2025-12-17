@@ -1,7 +1,7 @@
 use crate::catalog::{CatalogManager, ConnectionInfo, SqliteCatalogManager, TableInfo};
 use crate::datafetch::{DataFetcher, FetchOrchestrator, NativeFetcher};
 use crate::datafusion::{block_on, RivetCatalogProvider};
-use crate::secrets::{EncryptedSecretManager, SecretManager};
+use crate::secrets::{EncryptedCatalogBackend, SecretManager, ENCRYPTED_PROVIDER_TYPE};
 use crate::source::Source;
 use crate::storage::{FilesystemStorage, StorageManager};
 use anyhow::Result;
@@ -25,7 +25,7 @@ pub struct RivetEngine {
     df_ctx: SessionContext,
     storage: Arc<dyn StorageManager>,
     orchestrator: Arc<FetchOrchestrator>,
-    secret_manager: Arc<dyn SecretManager>,
+    secret_manager: Arc<SecretManager>,
 }
 
 impl RivetEngine {
@@ -191,8 +191,8 @@ impl RivetEngine {
         &self.storage
     }
 
-    /// Get a reference to the secret manager, if configured.
-    pub fn secret_manager(&self) -> &Arc<dyn SecretManager> {
+    /// Get a reference to the secret manager.
+    pub fn secret_manager(&self) -> &Arc<SecretManager> {
         &self.secret_manager
     }
 
@@ -600,10 +600,15 @@ impl RivetEngineBuilder {
             )
         })?;
 
-        let secret_manager: Arc<dyn SecretManager> = Arc::new(
-            EncryptedSecretManager::from_base64_key(&secret_key, catalog.clone())
+        let backend = Arc::new(
+            EncryptedCatalogBackend::from_base64_key(&secret_key, catalog.clone())
                 .map_err(|e| anyhow::anyhow!("Invalid secret key: {}", e))?,
         );
+        let secret_manager = Arc::new(SecretManager::new(
+            backend,
+            catalog.clone(),
+            ENCRYPTED_PROVIDER_TYPE,
+        ));
         info!("Secret manager initialized");
 
         // Step 7: Create fetch orchestrator (needs secret_manager)

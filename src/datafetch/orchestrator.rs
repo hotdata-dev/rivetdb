@@ -14,7 +14,7 @@ pub struct FetchOrchestrator {
     fetcher: Arc<dyn DataFetcher>,
     storage: Arc<dyn StorageManager>,
     catalog: Arc<dyn CatalogManager>,
-    secret_manager: Arc<dyn SecretManager>,
+    secret_manager: Arc<SecretManager>,
 }
 
 impl FetchOrchestrator {
@@ -22,7 +22,7 @@ impl FetchOrchestrator {
         fetcher: Arc<dyn DataFetcher>,
         storage: Arc<dyn StorageManager>,
         catalog: Arc<dyn CatalogManager>,
-        secret_manager: Arc<dyn SecretManager>,
+        secret_manager: Arc<SecretManager>,
     ) -> Self {
         Self {
             fetcher,

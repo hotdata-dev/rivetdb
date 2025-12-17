@@ -16,7 +16,7 @@ impl Credential {
     /// Resolve the credential to a plaintext string.
     /// Returns an error if no secret manager is provided but a secret reference exists,
     /// or if the secret cannot be found/decoded.
-    pub async fn resolve(&self, secrets: Option<&dyn SecretManager>) -> anyhow::Result<String> {
+    pub async fn resolve(&self, secrets: Option<&SecretManager>) -> anyhow::Result<String> {
         match self {
             Credential::None => Err(anyhow::anyhow!("no credential configured")),
             Credential::SecretRef { name } => {

@@ -97,11 +97,8 @@ impl From<crate::secrets::SecretError> for ApiError {
                 ApiError::service_unavailable("Secret manager not configured")
             }
             SecretError::InvalidName(msg) => ApiError::bad_request(msg),
-            SecretError::EncryptionFailed(msg) => {
-                ApiError::internal_error(format!("Encryption failed: {}", msg))
-            }
-            SecretError::DecryptionFailed(msg) => {
-                ApiError::internal_error(format!("Decryption failed: {}", msg))
+            SecretError::Backend(msg) => {
+                ApiError::internal_error(format!("Backend error: {}", msg))
             }
             SecretError::InvalidUtf8 => ApiError::internal_error("Invalid UTF-8 in secret"),
             SecretError::Database(msg) => {

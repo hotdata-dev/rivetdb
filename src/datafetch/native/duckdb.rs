@@ -13,7 +13,7 @@ use super::StreamingParquetWriter;
 /// Discover tables and columns from DuckDB/MotherDuck
 pub async fn discover_tables(
     source: &Source,
-    secrets: Option<&dyn SecretManager>,
+    secrets: Option<&SecretManager>,
 ) -> Result<Vec<TableMetadata>, DataFetchError> {
     let connection_string = resolve_connection_string(source, secrets).await?;
     let catalog = source.catalog().map(|s| s.to_string());
@@ -28,7 +28,7 @@ pub async fn discover_tables(
 /// Resolve credentials and build connection string for DuckDB or Motherduck source.
 pub async fn resolve_connection_string(
     source: &Source,
-    secrets: Option<&dyn SecretManager>,
+    secrets: Option<&SecretManager>,
 ) -> Result<String, DataFetchError> {
     match source {
         Source::Duckdb { path } => Ok(path.clone()),
@@ -139,7 +139,7 @@ enum FetchMessage {
 /// Fetch table data and write to Parquet using streaming to avoid OOM on large tables
 pub async fn fetch_table(
     source: &Source,
-    secrets: Option<&dyn SecretManager>,
+    secrets: Option<&SecretManager>,
     _catalog: Option<&str>,
     schema: &str,
     table: &str,
