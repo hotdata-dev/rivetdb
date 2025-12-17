@@ -225,7 +225,7 @@ impl RivetEngine {
         info!("Discovering tables for {} source...", source_type);
         let fetcher = crate::datafetch::NativeFetcher::new();
         let tables = fetcher
-            .discover_tables(&source, Some(&*self.secret_manager))
+            .discover_tables(&source, &self.secret_manager)
             .await
             .map_err(|e| anyhow::anyhow!("Discovery failed: {}", e))?;
 

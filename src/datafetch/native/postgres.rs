@@ -39,7 +39,7 @@ fn build_connection_string(
 /// Resolve credentials and build connection string for a Postgres source.
 pub async fn resolve_connection_string(
     source: &Source,
-    secrets: Option<&SecretManager>,
+    secrets: &SecretManager,
 ) -> Result<String, DataFetchError> {
     let (host, port, user, database, credential) = match source {
         Source::Postgres {
@@ -92,7 +92,7 @@ async fn connect_with_ssl_retry(connection_string: &str) -> Result<PgConnection,
 /// Discover tables and columns from PostgreSQL
 pub async fn discover_tables(
     source: &Source,
-    secrets: Option<&SecretManager>,
+    secrets: &SecretManager,
 ) -> Result<Vec<TableMetadata>, DataFetchError> {
     let connection_string = resolve_connection_string(source, secrets).await?;
     let mut conn = connect_with_ssl_retry(&connection_string).await?;
@@ -162,7 +162,7 @@ pub async fn discover_tables(
 /// Fetch table data and write to Parquet using streaming to avoid OOM on large tables
 pub async fn fetch_table(
     source: &Source,
-    secrets: Option<&SecretManager>,
+    secrets: &SecretManager,
     _catalog: Option<&str>,
     schema: &str,
     table: &str,

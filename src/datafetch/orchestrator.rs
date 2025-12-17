@@ -54,7 +54,7 @@ impl FetchOrchestrator {
         self.fetcher
             .fetch_table(
                 source,
-                Some(&*self.secret_manager),
+                &self.secret_manager,
                 None, // catalog
                 schema_name,
                 table_name,

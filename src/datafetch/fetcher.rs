@@ -12,7 +12,7 @@ pub trait DataFetcher: Send + Sync + std::fmt::Debug {
     async fn discover_tables(
         &self,
         source: &Source,
-        secrets: Option<&SecretManager>,
+        secrets: &SecretManager,
     ) -> Result<Vec<TableMetadata>, DataFetchError>;
 
     /// Fetch table data and write to the provided Parquet writer.
@@ -21,7 +21,7 @@ pub trait DataFetcher: Send + Sync + std::fmt::Debug {
     async fn fetch_table(
         &self,
         source: &Source,
-        secrets: Option<&SecretManager>,
+        secrets: &SecretManager,
         catalog: Option<&str>,
         schema: &str,
         table: &str,

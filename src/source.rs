@@ -14,16 +14,12 @@ pub enum Credential {
 
 impl Credential {
     /// Resolve the credential to a plaintext string.
-    /// Returns an error if no secret manager is provided but a secret reference exists,
-    /// or if the secret cannot be found/decoded.
-    pub async fn resolve(&self, secrets: Option<&SecretManager>) -> anyhow::Result<String> {
+    /// Returns an error if the credential is None or the secret cannot be found/decoded.
+    pub async fn resolve(&self, secrets: &SecretManager) -> anyhow::Result<String> {
         match self {
             Credential::None => Err(anyhow::anyhow!("no credential configured")),
             Credential::SecretRef { name } => {
-                let mgr = secrets.ok_or_else(|| {
-                    anyhow::anyhow!("secret manager required to resolve credential '{}'", name)
-                })?;
-                let bytes = mgr.get(name).await.map_err(|e| {
+                let bytes = secrets.get(name).await.map_err(|e| {
                     anyhow::anyhow!("failed to resolve secret '{}': {}", name, e)
                 })?;
                 String::from_utf8(bytes)

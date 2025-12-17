@@ -25,7 +25,7 @@ impl DataFetcher for NativeFetcher {
     async fn discover_tables(
         &self,
         source: &Source,
-        secrets: Option<&SecretManager>,
+        secrets: &SecretManager,
     ) -> Result<Vec<TableMetadata>, DataFetchError> {
         match source {
             Source::Duckdb { .. } | Source::Motherduck { .. } => {
@@ -39,7 +39,7 @@ impl DataFetcher for NativeFetcher {
     async fn fetch_table(
         &self,
         source: &Source,
-        secrets: Option<&SecretManager>,
+        secrets: &SecretManager,
         catalog: Option<&str>,
         schema: &str,
         table: &str,
