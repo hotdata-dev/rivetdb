@@ -263,36 +263,25 @@ impl CatalogManager for PostgresCatalogManager {
         metadata: &SecretMetadata,
         lock: Option<OptimisticLock>,
     ) -> Result<bool> {
-        let result = match lock {
-            Some(lock) => {
-                sqlx::query(
-                    "UPDATE secrets SET provider = $1, provider_ref = $2, status = $3, updated_at = $4 \
-                     WHERE name = $5 AND created_at = $6",
-                )
-                .bind(&metadata.provider)
-                .bind(&metadata.provider_ref)
-                .bind(metadata.status.as_str())
-                .bind(metadata.updated_at)
-                .bind(&metadata.name)
-                .bind(lock.created_at)
-                .execute(self.backend.pool())
-                .await?
-            }
-            None => {
-                sqlx::query(
-                    "UPDATE secrets SET provider = $1, provider_ref = $2, status = $3, updated_at = $4 \
-                     WHERE name = $5",
-                )
-                .bind(&metadata.provider)
-                .bind(&metadata.provider_ref)
-                .bind(metadata.status.as_str())
-                .bind(metadata.updated_at)
-                .bind(&metadata.name)
-                .execute(self.backend.pool())
-                .await?
-            }
-        };
+        use sqlx::QueryBuilder;
 
+        let mut qb = QueryBuilder::new("UPDATE secrets SET ");
+        qb.push("provider = ")
+            .push_bind(&metadata.provider)
+            .push(", provider_ref = ")
+            .push_bind(&metadata.provider_ref)
+            .push(", status = ")
+            .push_bind(metadata.status.as_str())
+            .push(", updated_at = ")
+            .push_bind(metadata.updated_at)
+            .push(" WHERE name = ")
+            .push_bind(&metadata.name);
+
+        if let Some(lock) = lock {
+            qb.push(" AND created_at = ").push_bind(lock.created_at);
+        }
+
+        let result = qb.build().execute(self.backend.pool()).await?;
         Ok(result.rows_affected() > 0)
     }
 

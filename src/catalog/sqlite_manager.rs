@@ -248,37 +248,28 @@ impl CatalogManager for SqliteCatalogManager {
         metadata: &SecretMetadata,
         lock: Option<OptimisticLock>,
     ) -> Result<bool> {
+        use sqlx::QueryBuilder;
+
         let updated_at = metadata.updated_at.to_rfc3339();
 
-        let result = match lock {
-            Some(lock) => {
-                let expected_created_at = lock.created_at.to_rfc3339();
-                sqlx::query(
-                    "UPDATE secrets SET provider = ?, provider_ref = ?, status = ?, updated_at = ? \
-                     WHERE name = ? AND created_at = ?",
-                )
-                .bind(&metadata.provider)
-                .bind(&metadata.provider_ref)
-                .bind(metadata.status.as_str())
-                .bind(&updated_at)
-                .bind(&metadata.name)
-                .bind(&expected_created_at)
-                .execute(self.backend.pool())
-                .await?
-            }
-            None => sqlx::query(
-                "UPDATE secrets SET provider = ?, provider_ref = ?, status = ?, updated_at = ? \
-                     WHERE name = ?",
-            )
-            .bind(&metadata.provider)
-            .bind(&metadata.provider_ref)
-            .bind(metadata.status.as_str())
-            .bind(&updated_at)
-            .bind(&metadata.name)
-            .execute(self.backend.pool())
-            .await?,
-        };
+        let mut qb = QueryBuilder::new("UPDATE secrets SET ");
+        qb.push("provider = ")
+            .push_bind(&metadata.provider)
+            .push(", provider_ref = ")
+            .push_bind(&metadata.provider_ref)
+            .push(", status = ")
+            .push_bind(metadata.status.as_str())
+            .push(", updated_at = ")
+            .push_bind(&updated_at)
+            .push(" WHERE name = ")
+            .push_bind(&metadata.name);
 
+        if let Some(lock) = lock {
+            let expected_created_at = lock.created_at.to_rfc3339();
+            qb.push(" AND created_at = ").push_bind(expected_created_at);
+        }
+
+        let result = qb.build().execute(self.backend.pool()).await?;
         Ok(result.rows_affected() > 0)
     }
 
