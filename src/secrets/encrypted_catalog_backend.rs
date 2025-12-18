@@ -97,11 +97,7 @@ impl SecretBackend for EncryptedCatalogBackend {
         }
     }
 
-    async fn put(
-        &self,
-        record: &SecretRecord,
-        value: &[u8],
-    ) -> Result<BackendWrite, BackendError> {
+    async fn put(&self, record: &SecretRecord, value: &[u8]) -> Result<BackendWrite, BackendError> {
         // Encrypt the value using the secret name as AAD
         let ciphertext = encrypt(&self.key, value, &record.name)
             .map_err(|e| BackendError::Storage(format!("Encryption failed: {}", e)))?;
@@ -268,7 +264,10 @@ mod tests {
         let result = backend2.get(&rec).await;
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Decryption failed"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Decryption failed"));
     }
 
     #[tokio::test]

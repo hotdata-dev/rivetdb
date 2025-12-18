@@ -155,7 +155,14 @@ async fn test_duckdb_fetch_table() {
     let mut writer = StreamingParquetWriter::new(output_path.clone());
 
     let result = fetcher
-        .fetch_table(&source, &secrets, None, "test_schema", "products", &mut writer)
+        .fetch_table(
+            &source,
+            &secrets,
+            None,
+            "test_schema",
+            "products",
+            &mut writer,
+        )
         .await;
     assert!(result.is_ok(), "Fetch should succeed: {:?}", result.err());
 

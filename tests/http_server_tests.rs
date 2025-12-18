@@ -802,7 +802,10 @@ async fn test_update_secret() -> Result<()> {
 
     // Verify updated_at is different from created_at
     let updated_at = update_json["updated_at"].as_str().unwrap();
-    assert_ne!(created_at, updated_at, "updated_at should change after update");
+    assert_ne!(
+        created_at, updated_at,
+        "updated_at should change after update"
+    );
 
     // Verify the new value can be retrieved via the manager
     let secret_value = app.engine.secret_manager().get("test_secret").await?;

@@ -63,8 +63,7 @@ pub trait SecretBackend: Debug + Send + Sync {
     ///
     /// Returns a `BackendWrite` so the manager knows whether it was a create
     /// vs update and can persist any backend-provided metadata.
-    async fn put(&self, record: &SecretRecord, value: &[u8])
-        -> Result<BackendWrite, BackendError>;
+    async fn put(&self, record: &SecretRecord, value: &[u8]) -> Result<BackendWrite, BackendError>;
 
     /// Delete the entry identified by `record`.
     ///

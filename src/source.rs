@@ -19,9 +19,10 @@ impl Credential {
         match self {
             Credential::None => Err(anyhow::anyhow!("no credential configured")),
             Credential::SecretRef { name } => {
-                let bytes = secrets.get(name).await.map_err(|e| {
-                    anyhow::anyhow!("failed to resolve secret '{}': {}", name, e)
-                })?;
+                let bytes = secrets
+                    .get(name)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("failed to resolve secret '{}': {}", name, e))?;
                 String::from_utf8(bytes)
                     .map_err(|_| anyhow::anyhow!("secret '{}' is not valid UTF-8", name))
             }

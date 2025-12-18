@@ -479,15 +479,10 @@ macro_rules! catalog_manager_tests {
                 };
 
                 // First create should succeed
-                catalog
-                    .create_secret_metadata(&metadata)
-                    .await
-                    .unwrap();
+                catalog.create_secret_metadata(&metadata).await.unwrap();
 
                 // Second create with same name should fail (unique constraint)
-                let result = catalog
-                    .create_secret_metadata(&metadata)
-                    .await;
+                let result = catalog.create_secret_metadata(&metadata).await;
 
                 assert!(result.is_err());
             }

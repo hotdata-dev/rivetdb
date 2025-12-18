@@ -61,7 +61,9 @@ pub async fn resolve_connection_string(
         .await
         .map_err(|e| DataFetchError::Connection(e.to_string()))?;
 
-    Ok(build_connection_string(host, port, user, database, &password))
+    Ok(build_connection_string(
+        host, port, user, database, &password,
+    ))
 }
 
 /// Connect to PostgreSQL with automatic SSL retry.

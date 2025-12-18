@@ -275,19 +275,17 @@ impl CatalogManager for SqliteCatalogManager {
                 .execute(self.backend.pool())
                 .await?
             }
-            None => {
-                sqlx::query(
-                    "UPDATE secrets SET provider = ?, provider_ref = ?, status = ?, updated_at = ? \
+            None => sqlx::query(
+                "UPDATE secrets SET provider = ?, provider_ref = ?, status = ?, updated_at = ? \
                      WHERE name = ?",
-                )
-                .bind(&metadata.provider)
-                .bind(&metadata.provider_ref)
-                .bind(metadata.status.as_str())
-                .bind(&updated_at)
-                .bind(&metadata.name)
-                .execute(self.backend.pool())
-                .await?
-            }
+            )
+            .bind(&metadata.provider)
+            .bind(&metadata.provider_ref)
+            .bind(metadata.status.as_str())
+            .bind(&updated_at)
+            .bind(&metadata.name)
+            .execute(self.backend.pool())
+            .await?,
         };
 
         Ok(result.rows_affected() > 0)

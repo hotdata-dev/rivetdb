@@ -25,8 +25,8 @@ const HEADER_SIZE: usize = 4 + 1 + 1 + NONCE_SIZE; // 18 bytes
 /// * `plaintext` - Data to encrypt
 /// * `aad` - Associated authenticated data (secret name, prevents blob swapping)
 pub fn encrypt(key: &[u8; 32], plaintext: &[u8], aad: &str) -> Result<Vec<u8>, EncryptError> {
-    let cipher = Aes256GcmSiv::new_from_slice(key)
-        .map_err(|e| EncryptError::CipherInit(e.to_string()))?;
+    let cipher =
+        Aes256GcmSiv::new_from_slice(key).map_err(|e| EncryptError::CipherInit(e.to_string()))?;
 
     // Generate random nonce
     let mut nonce_bytes = [0u8; NONCE_SIZE];
@@ -89,8 +89,8 @@ pub fn decrypt(key: &[u8; 32], encrypted: &[u8], aad: &str) -> Result<Vec<u8>, D
         .expect("slice length matches NONCE_SIZE");
     let ciphertext = &encrypted[HEADER_SIZE..];
 
-    let cipher = Aes256GcmSiv::new_from_slice(key)
-        .map_err(|e| DecryptError::CipherInit(e.to_string()))?;
+    let cipher =
+        Aes256GcmSiv::new_from_slice(key).map_err(|e| DecryptError::CipherInit(e.to_string()))?;
 
     let nonce = Nonce::from(nonce_bytes);
 

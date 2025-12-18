@@ -304,7 +304,9 @@ impl TestExecutor for ApiExecutor {
             } => {
                 let cred_json = match credential {
                     rivetdb::source::Credential::None => json!({"type": "none"}),
-                    rivetdb::source::Credential::SecretRef { name } => json!({"type": "secret_ref", "name": name}),
+                    rivetdb::source::Credential::SecretRef { name } => {
+                        json!({"type": "secret_ref", "name": name})
+                    }
                 };
                 (
                     "postgres",
@@ -772,7 +774,10 @@ mod postgres_fixtures {
             .await
             .expect("Failed to start postgres");
         let port = container.get_host_port_ipv4(5432).await.unwrap();
-        let conn_str = format!("postgres://postgres:{}@localhost:{}/postgres", TEST_PASSWORD, port);
+        let conn_str = format!(
+            "postgres://postgres:{}@localhost:{}/postgres",
+            TEST_PASSWORD, port
+        );
         (container, conn_str)
     }
 
@@ -944,7 +949,9 @@ mod postgres_tests {
     async fn test_engine_golden_path() {
         let harness = TestHarness::new().await;
         // Store the password as a secret before creating the fixture
-        harness.store_secret(PG_SECRET_NAME, postgres_fixtures::TEST_PASSWORD).await;
+        harness
+            .store_secret(PG_SECRET_NAME, postgres_fixtures::TEST_PASSWORD)
+            .await;
         let fixture = postgres_fixtures::standard(PG_SECRET_NAME).await;
         run_golden_path_test(harness.engine(), &fixture.source, "pg_conn").await;
     }
@@ -952,7 +959,9 @@ mod postgres_tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_api_golden_path() {
         let harness = TestHarness::new().await;
-        harness.store_secret(PG_SECRET_NAME, postgres_fixtures::TEST_PASSWORD).await;
+        harness
+            .store_secret(PG_SECRET_NAME, postgres_fixtures::TEST_PASSWORD)
+            .await;
         let fixture = postgres_fixtures::standard(PG_SECRET_NAME).await;
         run_golden_path_test(harness.api(), &fixture.source, "pg_conn").await;
     }
@@ -960,7 +969,9 @@ mod postgres_tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_engine_multi_schema() {
         let harness = TestHarness::new().await;
-        harness.store_secret(PG_SECRET_NAME, postgres_fixtures::TEST_PASSWORD).await;
+        harness
+            .store_secret(PG_SECRET_NAME, postgres_fixtures::TEST_PASSWORD)
+            .await;
         let fixture = postgres_fixtures::multi_schema(PG_SECRET_NAME).await;
         run_multi_schema_test(harness.engine(), &fixture.source, "pg_conn").await;
     }
@@ -968,7 +979,9 @@ mod postgres_tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_api_multi_schema() {
         let harness = TestHarness::new().await;
-        harness.store_secret(PG_SECRET_NAME, postgres_fixtures::TEST_PASSWORD).await;
+        harness
+            .store_secret(PG_SECRET_NAME, postgres_fixtures::TEST_PASSWORD)
+            .await;
         let fixture = postgres_fixtures::multi_schema(PG_SECRET_NAME).await;
         run_multi_schema_test(harness.api(), &fixture.source, "pg_conn").await;
     }
