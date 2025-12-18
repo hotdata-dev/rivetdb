@@ -202,8 +202,15 @@ pub async fn create_connection_handler(
             Ok(count) => (count, DiscoveryStatus::Success, None),
             Err(e) => {
                 let root_cause = e.root_cause().to_string();
-                let msg = root_cause.lines().next().unwrap_or("Unknown error").to_string();
-                error!("Discovery failed for connection '{}': {}", request.name, msg);
+                let msg = root_cause
+                    .lines()
+                    .next()
+                    .unwrap_or("Unknown error")
+                    .to_string();
+                error!(
+                    "Discovery failed for connection '{}': {}",
+                    request.name, msg
+                );
                 (0, DiscoveryStatus::Failed, Some(msg))
             }
         };
@@ -239,7 +246,11 @@ pub async fn discover_connection_handler(
             Ok(count) => (count, DiscoveryStatus::Success, None),
             Err(e) => {
                 let root_cause = e.root_cause().to_string();
-                let msg = root_cause.lines().next().unwrap_or("Unknown error").to_string();
+                let msg = root_cause
+                    .lines()
+                    .next()
+                    .unwrap_or("Unknown error")
+                    .to_string();
                 error!("Discovery failed for connection '{}': {}", name, msg);
                 (0, DiscoveryStatus::Failed, Some(msg))
             }
