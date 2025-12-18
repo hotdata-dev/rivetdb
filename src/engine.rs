@@ -62,6 +62,11 @@ impl RivetEngine {
             builder = builder.cache_dir(PathBuf::from(cache));
         }
 
+        // Set secret key if explicitly configured
+        if let Some(key) = &config.secrets.encryption_key {
+            builder = builder.secret_key(key);
+        }
+
         // Only create explicit catalog for non-sqlite backends
         if config.catalog.catalog_type != "sqlite" {
             let catalog = Self::create_catalog_from_config(config).await?;
@@ -773,13 +778,12 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_from_config_sqlite_filesystem() {
-        use crate::config::{AppConfig, CatalogConfig, PathsConfig, ServerConfig, StorageConfig};
+        use crate::config::{
+            AppConfig, CatalogConfig, PathsConfig, SecretsConfig, ServerConfig, StorageConfig,
+        };
 
         let temp_dir = TempDir::new().unwrap();
         let base_dir = temp_dir.path().to_path_buf();
-
-        // Set secret key for this test
-        std::env::set_var("RIVETDB_SECRET_KEY", test_secret_key());
 
         let config = AppConfig {
             server: ServerConfig {
@@ -803,6 +807,9 @@ mod tests {
             paths: PathsConfig {
                 base_dir: Some(base_dir.to_str().unwrap().to_string()),
                 cache_dir: None,
+            },
+            secrets: SecretsConfig {
+                encryption_key: Some(test_secret_key()),
             },
         };
 

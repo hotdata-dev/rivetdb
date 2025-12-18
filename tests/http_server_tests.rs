@@ -741,6 +741,126 @@ async fn test_create_secret_missing_fields() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn test_update_secret() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let engine = RivetEngine::builder()
+        .base_dir(temp_dir.path())
+        .secret_key(generate_test_secret_key())
+        .build()
+        .await?;
+    let app = AppServer::new(engine);
+
+    // Create a secret
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_SECRETS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "name": "test_secret",
+                    "value": "original_value"
+                }))?))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let create_json: serde_json::Value = serde_json::from_slice(&body)?;
+    let created_at = create_json["created_at"].as_str().unwrap();
+
+    // Small delay to ensure updated_at will be different
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+    // Update the secret
+    let secret_path = PATH_SECRET.replace("{name}", "test_secret");
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(&secret_path)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "value": "updated_value"
+                }))?))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let update_json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    assert_eq!(update_json["name"], "test_secret");
+    assert!(update_json["updated_at"].is_string());
+
+    // Verify updated_at is different from created_at
+    let updated_at = update_json["updated_at"].as_str().unwrap();
+    assert_ne!(created_at, updated_at, "updated_at should change after update");
+
+    // Verify the new value can be retrieved via the manager
+    let secret_value = app.engine.secret_manager().get("test_secret").await?;
+    assert_eq!(secret_value, b"updated_value");
+
+    // Verify metadata via GET shows updated timestamps
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(&secret_path)
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let get_json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    assert_eq!(get_json["updated_at"].as_str().unwrap(), updated_at);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_update_nonexistent_secret() -> Result<()> {
+    let (app, _tempdir) = setup_test().await?;
+
+    let secret_path = PATH_SECRET.replace("{name}", "does_not_exist");
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(&secret_path)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "value": "some_value"
+                }))?))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    assert!(json["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("not found"));
+    assert_eq!(json["error"]["code"], "NOT_FOUND");
+
+    Ok(())
+}
+
 // ==================== Decoupled Registration/Discovery Tests ====================
 
 #[tokio::test(flavor = "multi_thread")]
