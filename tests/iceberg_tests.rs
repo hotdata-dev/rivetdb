@@ -187,7 +187,7 @@ async fn create_minio_bucket(endpoint: &str, bucket: &str) {
         endpoint.trim_start_matches("http://")
     );
 
-    let _ = Command::new("docker")
+    let output = Command::new("docker")
         .args([
             "run",
             "--rm",
@@ -199,7 +199,15 @@ async fn create_minio_bucket(endpoint: &str, bucket: &str) {
             "--ignore-existing",
             &format!("minio/{}", bucket),
         ])
-        .output();
+        .output()
+        .expect("Failed to run docker mc command - is Docker running?");
+
+    if !output.status.success() {
+        eprintln!(
+            "Warning: mc mb command failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     // Give MinIO time to process
     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -216,7 +224,16 @@ async fn bootstrap_lakekeeper(catalog_uri: &str, minio_endpoint: &str) {
     });
 
     let url = format!("{}/management/v1/bootstrap", catalog_uri);
-    let _ = client.post(&url).json(&bootstrap_payload).send().await;
+    // Bootstrap may fail if already done - this is expected
+    match client.post(&url).json(&bootstrap_payload).send().await {
+        Ok(resp) if !resp.status().is_success() => {
+            eprintln!("Bootstrap returned {}: may already be bootstrapped", resp.status());
+        }
+        Err(e) => {
+            eprintln!("Bootstrap request failed: {} - continuing anyway", e);
+        }
+        Ok(_) => {}
+    }
 
     // Get the default project created by bootstrap
     let url = format!("{}/management/v1/project", catalog_uri);
