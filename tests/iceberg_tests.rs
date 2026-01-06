@@ -100,7 +100,7 @@ impl IcebergTestInfra {
         // Step 1: Run Lakekeeper migrate command
         // The Lakekeeper image is a minimal distroless image, so we can't use shell commands.
         // We need to run migrate first, then start serve in a separate container.
-        let _migrate = GenericImage::new(LAKEKEEPER_IMAGE, LAKEKEEPER_TAG)
+        let migrate = GenericImage::new(LAKEKEEPER_IMAGE, LAKEKEEPER_TAG)
             .with_wait_for(WaitFor::Nothing)
             .with_cmd(["migrate"])
             .with_startup_timeout(Duration::from_secs(60))
@@ -112,8 +112,11 @@ impl IcebergTestInfra {
             .await
             .expect("Failed to start Lakekeeper migrate");
 
-        // Wait for migration to complete
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        // Wait for migration to complete by reading stdout until container exits
+        use tokio::io::AsyncReadExt;
+        let mut stdout = migrate.stdout(true);
+        let mut buf = Vec::new();
+        let _ = stdout.read_to_end(&mut buf).await;
 
         // Step 2: Run Lakekeeper serve
         // Lakekeeper logs to stdout in JSON format. The ready message is "Lakekeeper is now running"
