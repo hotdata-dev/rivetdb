@@ -70,7 +70,8 @@ impl IcebergTestInfra {
             .await
             .expect("Failed to start PostgreSQL");
 
-        let pg_port = postgres.get_host_port_ipv4(5432).await.unwrap();
+        // Get PostgreSQL's bridge IP for inter-container communication (cross-platform)
+        let pg_bridge_ip = postgres.get_bridge_ip_address().await.unwrap();
 
         // Start MinIO for S3-compatible storage
         let minio = MinIO::default()
@@ -78,20 +79,23 @@ impl IcebergTestInfra {
             .await
             .expect("Failed to start MinIO");
 
-        let minio_port = minio.get_host_port_ipv4(9000).await.unwrap();
+        // Get MinIO's bridge IP for inter-container communication
+        let minio_bridge_ip = minio.get_bridge_ip_address().await.unwrap();
+        let minio_host_port = minio.get_host_port_ipv4(9000).await.unwrap();
         let minio_host = minio.get_host().await.unwrap();
 
-        // Create the warehouse bucket in MinIO
-        let minio_endpoint = format!("http://{}:{}", minio_host, minio_port);
+        // Create the warehouse bucket in MinIO (from host)
+        let minio_endpoint = format!("http://{}:{}", minio_host, minio_host_port);
         create_minio_bucket(&minio_endpoint, MINIO_BUCKET).await;
 
         // Build Lakekeeper container with environment variables
-        // Lakekeeper needs access to PostgreSQL and MinIO on the Docker network
+        // Use bridge IPs for inter-container communication (works on Linux, macOS, Windows)
         let pg_encryption_key = "0123456789abcdef0123456789abcdef";
         let pg_connection_url = format!(
-            "postgres://postgres:postgres@host.docker.internal:{}/postgres",
-            pg_port
+            "postgres://postgres:postgres@{}:5432/postgres",
+            pg_bridge_ip
         );
+        let minio_internal_endpoint = format!("http://{}:9000", minio_bridge_ip);
 
         // Step 1: Run Lakekeeper migrate command
         // The Lakekeeper image is a minimal distroless image, so we can't use shell commands.
@@ -126,10 +130,7 @@ impl IcebergTestInfra {
             .with_env_var("AWS_ACCESS_KEY_ID", MINIO_ROOT_USER)
             .with_env_var("AWS_SECRET_ACCESS_KEY", MINIO_ROOT_PASSWORD)
             .with_env_var("AWS_REGION", "us-east-1")
-            .with_env_var(
-                "AWS_ENDPOINT_URL",
-                format!("http://host.docker.internal:{}", minio_port),
-            )
+            .with_env_var("AWS_ENDPOINT_URL", &minio_internal_endpoint)
             .with_env_var("AWS_ALLOW_HTTP", "true")
             .start()
             .await
@@ -159,7 +160,7 @@ impl IcebergTestInfra {
         }
 
         // Bootstrap the catalog with a warehouse
-        bootstrap_lakekeeper(&catalog_uri, minio_port).await;
+        bootstrap_lakekeeper(&catalog_uri, &minio_internal_endpoint).await;
 
         Self {
             postgres,
@@ -202,10 +203,10 @@ async fn create_minio_bucket(endpoint: &str, bucket: &str) {
 }
 
 /// Bootstrap Lakekeeper with a warehouse and test namespace/table
-async fn bootstrap_lakekeeper(catalog_uri: &str, minio_port: u16) {
+async fn bootstrap_lakekeeper(catalog_uri: &str, minio_endpoint: &str) {
     let client = reqwest::Client::new();
 
-    // Step 1: Bootstrap Lakekeeper (creates initial admin and default project)
+    // Bootstrap Lakekeeper (creates initial admin and default project)
     let bootstrap_payload = serde_json::json!({
         "accept-terms-of-use": true,
         "is-operator": true
@@ -240,7 +241,7 @@ async fn bootstrap_lakekeeper(catalog_uri: &str, minio_port: u16) {
             "bucket": MINIO_BUCKET,
             "region": "us-east-1",
             "path-style-access": true,
-            "endpoint": format!("http://host.docker.internal:{}", minio_port),
+            "endpoint": minio_endpoint,
             "sts-enabled": false,
             "flavor": "minio"
         },
