@@ -11,6 +11,7 @@ use futures::StreamExt;
 use sqlx::mysql::{MySqlColumn, MySqlConnection, MySqlRow};
 use sqlx::{Column, Connection, Row, TypeInfo};
 use std::sync::Arc;
+use tracing::warn;
 use urlencoding::encode;
 
 use crate::datafetch::{ColumnMetadata, DataFetchError, TableMetadata};
@@ -305,27 +306,52 @@ fn mysql_type_to_arrow(mysql_type: &str) -> DataType {
 
     // MySQL COLUMN_TYPE includes size info like "int(11)" or "varchar(255)"
     let type_lower = mysql_type.to_lowercase();
+    let is_unsigned = type_lower.contains("unsigned");
 
     // Special case: TINYINT(1) is conventionally used as boolean in MySQL
-    // Other TINYINT sizes (or bare TINYINT) should be treated as Int8
-    if type_lower.starts_with("tinyint(1)") || type_lower == "tinyint(1) unsigned" {
+    if type_lower.starts_with("tinyint(1)") {
         return DataType::Boolean;
     }
+    // Other TINYINT sizes: unsigned maps to Int16 to avoid overflow
     if type_lower.starts_with("tinyint") {
-        return DataType::Int8;
+        return if is_unsigned {
+            DataType::Int16
+        } else {
+            DataType::Int8
+        };
     }
 
     // Extract the base type by taking everything before the first parenthesis
     let base_type = type_lower.split('(').next().unwrap_or(&type_lower).trim();
 
-    // Also handle "unsigned" suffix
+    // Remove "unsigned" suffix to get clean base type
     let base_type = base_type.split_whitespace().next().unwrap_or(base_type);
 
     match base_type {
         "bool" | "boolean" => DataType::Boolean,
-        "smallint" => DataType::Int16,
-        "mediumint" | "int" | "integer" => DataType::Int32,
-        "bigint" => DataType::Int64,
+        // Unsigned integers map to next larger signed type to avoid overflow
+        "smallint" => {
+            if is_unsigned {
+                DataType::Int32
+            } else {
+                DataType::Int16
+            }
+        }
+        "mediumint" | "int" | "integer" => {
+            if is_unsigned {
+                DataType::Int64
+            } else {
+                DataType::Int32
+            }
+        }
+        // BIGINT UNSIGNED maps to Utf8 to preserve full precision (max 18446744073709551615)
+        "bigint" => {
+            if is_unsigned {
+                DataType::Utf8
+            } else {
+                DataType::Int64
+            }
+        }
         "float" => DataType::Float32,
         "double" | "real" => DataType::Float64,
         // Complex numeric types: fallback to Utf8 to preserve precision
@@ -338,7 +364,9 @@ fn mysql_type_to_arrow(mysql_type: &str) -> DataType {
         }
         "date" => DataType::Date32,
         "time" => DataType::Utf8, // Time without date stored as string
-        "datetime" | "timestamp" => DataType::Timestamp(TimeUnit::Microsecond, None),
+        "datetime" => DataType::Timestamp(TimeUnit::Microsecond, None),
+        // MySQL TIMESTAMP is stored in UTC, so we annotate with timezone
+        "timestamp" => DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
         "year" => DataType::Int32,
         "json" => DataType::Utf8,
         "bit" => DataType::Binary,
@@ -387,9 +415,34 @@ fn make_builder(data_type: &DataType, capacity: usize) -> Box<dyn ArrayBuilder> 
     }
 }
 
+/// Helper to try getting a value and log a warning if conversion fails (but value exists)
+fn try_get_with_warning<'r, T>(
+    row: &'r MySqlRow,
+    idx: usize,
+    type_name: &str,
+) -> Option<T>
+where
+    T: sqlx::Decode<'r, sqlx::MySql> + sqlx::Type<sqlx::MySql>,
+{
+    match row.try_get::<T, _>(idx) {
+        Ok(val) => Some(val),
+        Err(sqlx::Error::ColumnDecode { source, .. }) => {
+            // Only warn if it's a decode error (type mismatch), not a null value
+            warn!(
+                column_index = idx,
+                target_type = type_name,
+                error = %source,
+                "MySQL column value could not be converted to target type, storing as NULL"
+            );
+            None
+        }
+        Err(_) => None, // Null or other error, silently return None
+    }
+}
+
 fn append_value(
     builder: &mut Box<dyn ArrayBuilder>,
-    row: &sqlx::mysql::MySqlRow,
+    row: &MySqlRow,
     idx: usize,
     data_type: &DataType,
 ) -> Result<(), DataFetchError> {
@@ -400,51 +453,51 @@ fn append_value(
                 .downcast_mut::<BooleanBuilder>()
                 .unwrap();
             // MySQL TINYINT(1) is used as boolean
-            b.append_option(row.try_get::<bool, _>(idx).ok());
+            b.append_option(try_get_with_warning::<bool>(row, idx, "bool"));
         }
         DataType::Int8 => {
             let b = builder.as_any_mut().downcast_mut::<Int8Builder>().unwrap();
-            b.append_option(row.try_get::<i8, _>(idx).ok());
+            b.append_option(try_get_with_warning::<i8>(row, idx, "i8"));
         }
         DataType::Int16 => {
             let b = builder.as_any_mut().downcast_mut::<Int16Builder>().unwrap();
-            b.append_option(row.try_get::<i16, _>(idx).ok());
+            b.append_option(try_get_with_warning::<i16>(row, idx, "i16"));
         }
         DataType::Int32 => {
             let b = builder.as_any_mut().downcast_mut::<Int32Builder>().unwrap();
-            b.append_option(row.try_get::<i32, _>(idx).ok());
+            b.append_option(try_get_with_warning::<i32>(row, idx, "i32"));
         }
         DataType::Int64 => {
             let b = builder.as_any_mut().downcast_mut::<Int64Builder>().unwrap();
-            b.append_option(row.try_get::<i64, _>(idx).ok());
+            b.append_option(try_get_with_warning::<i64>(row, idx, "i64"));
         }
         DataType::Float32 => {
             let b = builder
                 .as_any_mut()
                 .downcast_mut::<Float32Builder>()
                 .unwrap();
-            b.append_option(row.try_get::<f32, _>(idx).ok());
+            b.append_option(try_get_with_warning::<f32>(row, idx, "f32"));
         }
         DataType::Float64 => {
             let b = builder
                 .as_any_mut()
                 .downcast_mut::<Float64Builder>()
                 .unwrap();
-            b.append_option(row.try_get::<f64, _>(idx).ok());
+            b.append_option(try_get_with_warning::<f64>(row, idx, "f64"));
         }
         DataType::Utf8 => {
             let b = builder
                 .as_any_mut()
                 .downcast_mut::<StringBuilder>()
                 .unwrap();
-            b.append_option(row.try_get::<String, _>(idx).ok());
+            b.append_option(try_get_with_warning::<String>(row, idx, "String"));
         }
         DataType::Binary => {
             let b = builder
                 .as_any_mut()
                 .downcast_mut::<BinaryBuilder>()
                 .unwrap();
-            b.append_option(row.try_get::<Vec<u8>, _>(idx).ok());
+            b.append_option(try_get_with_warning::<Vec<u8>>(row, idx, "Vec<u8>"));
         }
         DataType::Date32 => {
             let b = builder
@@ -452,7 +505,7 @@ fn append_value(
                 .downcast_mut::<Date32Builder>()
                 .unwrap();
             // chrono::NaiveDate -> days since epoch
-            if let Ok(date) = row.try_get::<chrono::NaiveDate, _>(idx) {
+            if let Some(date) = try_get_with_warning::<chrono::NaiveDate>(row, idx, "NaiveDate") {
                 let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
                 let days = (date - epoch).num_days() as i32;
                 b.append_value(days);
@@ -466,7 +519,8 @@ fn append_value(
                 .downcast_mut::<TimestampMicrosecondBuilder>()
                 .unwrap();
             // chrono::NaiveDateTime -> microseconds since epoch
-            if let Ok(ts) = row.try_get::<chrono::NaiveDateTime, _>(idx) {
+            if let Some(ts) = try_get_with_warning::<chrono::NaiveDateTime>(row, idx, "NaiveDateTime")
+            {
                 let micros = ts.and_utc().timestamp_micros();
                 b.append_value(micros);
             } else {
@@ -479,7 +533,7 @@ fn append_value(
                 .as_any_mut()
                 .downcast_mut::<StringBuilder>()
                 .unwrap();
-            b.append_option(row.try_get::<String, _>(idx).ok());
+            b.append_option(try_get_with_warning::<String>(row, idx, "String"));
         }
     }
     Ok(())
@@ -502,13 +556,9 @@ mod tests {
             mysql_type_to_arrow("tinyint(1) unsigned"),
             DataType::Boolean
         ));
-        // Other TINYINT sizes are Int8
+        // Other TINYINT sizes are Int8 (signed) or Int16 (unsigned)
         assert!(matches!(mysql_type_to_arrow("tinyint"), DataType::Int8));
         assert!(matches!(mysql_type_to_arrow("tinyint(4)"), DataType::Int8));
-        assert!(matches!(
-            mysql_type_to_arrow("tinyint unsigned"),
-            DataType::Int8
-        ));
         assert!(matches!(mysql_type_to_arrow("smallint"), DataType::Int16));
         assert!(matches!(
             mysql_type_to_arrow("smallint(6)"),
@@ -547,6 +597,7 @@ mod tests {
         assert!(matches!(mysql_type_to_arrow("time"), DataType::Utf8));
         assert!(matches!(mysql_type_to_arrow("year"), DataType::Int32));
 
+        // DATETIME has no timezone info
         match mysql_type_to_arrow("datetime") {
             DataType::Timestamp(unit, tz) => {
                 assert!(matches!(
@@ -558,13 +609,15 @@ mod tests {
             _ => panic!("Expected Timestamp type"),
         }
 
+        // TIMESTAMP stores in UTC, so we annotate with timezone
         match mysql_type_to_arrow("timestamp") {
             DataType::Timestamp(unit, tz) => {
                 assert!(matches!(
                     unit,
                     datafusion::arrow::datatypes::TimeUnit::Microsecond
                 ));
-                assert!(tz.is_none());
+                assert!(tz.is_some());
+                assert_eq!(tz.as_ref().unwrap().as_ref(), "UTC");
             }
             _ => panic!("Expected Timestamp type"),
         }
@@ -623,14 +676,52 @@ mod tests {
 
     #[test]
     fn test_mysql_type_to_arrow_unsigned() {
-        // Unsigned types should still map to their base type
+        // Unsigned types map to next larger signed type to avoid overflow
         assert!(matches!(
-            mysql_type_to_arrow("int unsigned"),
+            mysql_type_to_arrow("tinyint unsigned"),
+            DataType::Int16
+        ));
+        assert!(matches!(
+            mysql_type_to_arrow("tinyint(3) unsigned"),
+            DataType::Int16
+        ));
+        assert!(matches!(
+            mysql_type_to_arrow("smallint unsigned"),
             DataType::Int32
         ));
         assert!(matches!(
-            mysql_type_to_arrow("bigint unsigned"),
+            mysql_type_to_arrow("int unsigned"),
             DataType::Int64
         ));
+        assert!(matches!(
+            mysql_type_to_arrow("int(10) unsigned"),
+            DataType::Int64
+        ));
+        // BIGINT UNSIGNED maps to Utf8 to preserve full precision
+        assert!(matches!(
+            mysql_type_to_arrow("bigint unsigned"),
+            DataType::Utf8
+        ));
+        assert!(matches!(
+            mysql_type_to_arrow("bigint(20) unsigned"),
+            DataType::Utf8
+        ));
+    }
+
+    #[test]
+    fn test_mysql_type_to_arrow_timestamp_timezone() {
+        use datafusion::arrow::datatypes::TimeUnit;
+        // DATETIME has no timezone info
+        assert!(matches!(
+            mysql_type_to_arrow("datetime"),
+            DataType::Timestamp(TimeUnit::Microsecond, None)
+        ));
+        // TIMESTAMP stores in UTC
+        match mysql_type_to_arrow("timestamp") {
+            DataType::Timestamp(TimeUnit::Microsecond, Some(tz)) => {
+                assert_eq!(tz.as_ref(), "UTC");
+            }
+            other => panic!("Expected Timestamp with UTC, got {:?}", other),
+        }
     }
 }
