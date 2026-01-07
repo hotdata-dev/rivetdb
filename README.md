@@ -52,9 +52,11 @@ Alternatively/additionally, you can build and run locally:
 - Initial examples and tests  
 - **Current adapter support:**
   - **Postgres**
+  - **MySQL**
   - **DuckDB**
   - **MotherDuck**
-  - **Apache Iceberg** (REST and Glue catalogs)  
+  - **Apache Iceberg** (REST and Glue catalogs)
+  - **Snowflake**  
 
 This foundation supports the larger roadmap described below.
 
@@ -149,6 +151,6 @@ These represent emerging priorities after the first public preview:
 | Arrow Flight SQL | Planned |
 | RivetDB CLI | Planned |
 | Cache | Alpha |
-| Current Connectors: Postgres, DuckDB, MotherDuck, Iceberg | Alpha |
+| Current Connectors: Postgres, MySQL, DuckDB, MotherDuck, Iceberg, Snowflake | Alpha |
 | Observability | Backlog |
 | Additional Connectors | Backlog |
