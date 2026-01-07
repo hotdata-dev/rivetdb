@@ -135,9 +135,10 @@ mod mysql_container_tests {
         let secrets =
             create_test_secret_manager_with_password(&temp_dir, "mysql-pass", TEST_PASSWORD).await;
 
-        // Start MySQL container
+        // Start MySQL container with explicit root password
         let container = Mysql::default()
             .with_tag("8.0")
+            .with_env_var("MYSQL_ROOT_PASSWORD", TEST_PASSWORD)
             .start()
             .await
             .expect("Failed to start mysql");
@@ -199,9 +200,10 @@ mod mysql_container_tests {
         let secrets =
             create_test_secret_manager_with_password(&temp_dir, "mysql-pass", TEST_PASSWORD).await;
 
-        // Start MySQL container
+        // Start MySQL container with explicit root password
         let container = Mysql::default()
             .with_tag("8.0")
+            .with_env_var("MYSQL_ROOT_PASSWORD", TEST_PASSWORD)
             .start()
             .await
             .expect("Failed to start mysql");
