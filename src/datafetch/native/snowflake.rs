@@ -20,13 +20,13 @@ use arrow_array_54 as arrow54_array;
 use arrow_ipc_54 as arrow54_ipc;
 
 /// Credential format for password authentication
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct PasswordCredential {
     password: String,
 }
 
 /// Credential format for key-pair authentication
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct KeyPairCredential {
     private_key: String,
 }
@@ -70,7 +70,9 @@ async fn build_client(
             role.as_deref(),
             &pwd_cred.password,
         )
-        .map_err(|e| DataFetchError::Connection(format!("Failed to create Snowflake client: {}", e)))?
+        .map_err(|e| {
+            DataFetchError::Connection(format!("Failed to create Snowflake client: {}", e))
+        })?
     } else if let Ok(key_cred) = serde_json::from_str::<KeyPairCredential>(&cred_json) {
         SnowflakeApi::with_certificate_auth(
             account,
@@ -405,21 +407,23 @@ fn snowflake_type_to_arrow(sf_type: &str) -> DataType {
     }
 }
 
-/// Extract string value from Arrow array
-fn get_string_value(
-    array: &dyn datafusion::arrow::array::Array,
-    row: usize,
-) -> Option<String> {
-    use datafusion::arrow::array::StringArray;
+/// Extract string value from Arrow array (supports both Utf8 and LargeUtf8)
+fn get_string_value(array: &dyn datafusion::arrow::array::Array, row: usize) -> Option<String> {
+    use datafusion::arrow::array::{LargeStringArray, StringArray};
 
     if array.is_null(row) {
         return None;
     }
 
-    array
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .map(|a| a.value(row).to_string())
+    // Try StringArray (Utf8) first, then LargeStringArray (LargeUtf8)
+    if let Some(a) = array.as_any().downcast_ref::<StringArray>() {
+        return Some(a.value(row).to_string());
+    }
+    if let Some(a) = array.as_any().downcast_ref::<LargeStringArray>() {
+        return Some(a.value(row).to_string());
+    }
+
+    None
 }
 
 /// Extract integer value from Arrow array
@@ -625,5 +629,94 @@ mod tests {
             r#"{"private_key": "-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----"}"#;
         let cred: KeyPairCredential = serde_json::from_str(json).unwrap();
         assert!(cred.private_key.contains("BEGIN PRIVATE KEY"));
+    }
+
+    #[test]
+    fn test_get_string_value_utf8() {
+        use datafusion::arrow::array::StringArray;
+        use std::sync::Arc;
+
+        let array = StringArray::from(vec![Some("hello"), None, Some("world")]);
+        let array_ref: Arc<dyn datafusion::arrow::array::Array> = Arc::new(array);
+
+        assert_eq!(
+            get_string_value(array_ref.as_ref(), 0),
+            Some("hello".to_string())
+        );
+        assert_eq!(get_string_value(array_ref.as_ref(), 1), None);
+        assert_eq!(
+            get_string_value(array_ref.as_ref(), 2),
+            Some("world".to_string())
+        );
+    }
+
+    #[test]
+    fn test_get_string_value_large_utf8() {
+        use datafusion::arrow::array::LargeStringArray;
+        use std::sync::Arc;
+
+        let array = LargeStringArray::from(vec![Some("large"), None, Some("string")]);
+        let array_ref: Arc<dyn datafusion::arrow::array::Array> = Arc::new(array);
+
+        assert_eq!(
+            get_string_value(array_ref.as_ref(), 0),
+            Some("large".to_string())
+        );
+        assert_eq!(get_string_value(array_ref.as_ref(), 1), None);
+        assert_eq!(
+            get_string_value(array_ref.as_ref(), 2),
+            Some("string".to_string())
+        );
+    }
+
+    #[test]
+    fn test_get_int_value_int64() {
+        use datafusion::arrow::array::Int64Array;
+        use std::sync::Arc;
+
+        let array = Int64Array::from(vec![Some(42i64), None, Some(-100i64)]);
+        let array_ref: Arc<dyn datafusion::arrow::array::Array> = Arc::new(array);
+
+        assert_eq!(get_int_value(array_ref.as_ref(), 0), Some(42));
+        assert_eq!(get_int_value(array_ref.as_ref(), 1), None);
+        assert_eq!(get_int_value(array_ref.as_ref(), 2), Some(-100));
+    }
+
+    #[test]
+    fn test_get_int_value_int32() {
+        use datafusion::arrow::array::Int32Array;
+        use std::sync::Arc;
+
+        let array = Int32Array::from(vec![Some(123i32), None, Some(456i32)]);
+        let array_ref: Arc<dyn datafusion::arrow::array::Array> = Arc::new(array);
+
+        assert_eq!(get_int_value(array_ref.as_ref(), 0), Some(123));
+        assert_eq!(get_int_value(array_ref.as_ref(), 1), None);
+        assert_eq!(get_int_value(array_ref.as_ref(), 2), Some(456));
+    }
+
+    #[test]
+    fn test_get_int_value_int16() {
+        use datafusion::arrow::array::Int16Array;
+        use std::sync::Arc;
+
+        let array = Int16Array::from(vec![Some(10i16), None, Some(20i16)]);
+        let array_ref: Arc<dyn datafusion::arrow::array::Array> = Arc::new(array);
+
+        assert_eq!(get_int_value(array_ref.as_ref(), 0), Some(10));
+        assert_eq!(get_int_value(array_ref.as_ref(), 1), None);
+        assert_eq!(get_int_value(array_ref.as_ref(), 2), Some(20));
+    }
+
+    #[test]
+    fn test_get_int_value_unsupported_type() {
+        use datafusion::arrow::array::Float64Array;
+        use std::sync::Arc;
+
+        // Float64 is not handled by get_int_value
+        let array = Float64Array::from(vec![Some(1.5)]);
+        let array_ref: Arc<dyn datafusion::arrow::array::Array> = Arc::new(array);
+
+        assert_eq!(get_int_value(array_ref.as_ref(), 0), None);
     }
 }
