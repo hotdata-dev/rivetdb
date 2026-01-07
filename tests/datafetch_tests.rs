@@ -94,18 +94,19 @@ async fn test_unsupported_driver() {
     let secrets = test_secret_manager(&temp_dir).await;
 
     let fetcher = NativeFetcher::new();
-    // Use a Snowflake source which is not implemented
+    // Use a Snowflake source with no credentials - should fail with connection error
     let source = Source::Snowflake {
         account: "fake".to_string(),
         user: "fake".to_string(),
         warehouse: "fake".to_string(),
         database: "fake".to_string(),
+        schema: None,
         role: None,
         credential: rivetdb::source::Credential::None,
     };
 
     let result = fetcher.discover_tables(&source, &secrets).await;
-    assert!(result.is_err(), "Should fail for unsupported driver");
+    assert!(result.is_err(), "Should fail without valid credentials");
 }
 
 #[tokio::test]
