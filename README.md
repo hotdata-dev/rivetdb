@@ -1,11 +1,3 @@
-<div align="center">
-  <picture>
-    <source srcset="logo/runtimedb-logo-transparent.png">
-    <img alt="RuntimeDB logo" src="logo/runtimedb-logo-transparent.png" height="100">
-  </picture>
-</div>
-
-
 # RuntimeDB
 
 > _Query everything — **instantly**._
