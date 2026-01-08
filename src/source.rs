@@ -77,6 +77,8 @@ pub enum Source {
         warehouse: String,
         database: String,
         #[serde(skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         role: Option<String>,
         #[serde(default)]
         credential: Credential,
@@ -177,6 +179,7 @@ mod tests {
             user: "bob".to_string(),
             warehouse: "COMPUTE_WH".to_string(),
             database: "PROD".to_string(),
+            schema: Some("PUBLIC".to_string()),
             role: Some("ANALYST".to_string()),
             credential: Credential::SecretRef {
                 name: "snowflake-secret".to_string(),
@@ -186,6 +189,7 @@ mod tests {
         let json = serde_json::to_string(&source).unwrap();
         assert!(json.contains(r#""type":"snowflake""#));
         assert!(json.contains(r#""account":"xyz123""#));
+        assert!(json.contains(r#""schema":"PUBLIC""#));
 
         let parsed: Source = serde_json::from_str(&json).unwrap();
         assert_eq!(source, parsed);
@@ -198,6 +202,7 @@ mod tests {
             user: "bob".to_string(),
             warehouse: "COMPUTE_WH".to_string(),
             database: "PROD".to_string(),
+            schema: None,
             role: None,
             credential: Credential::SecretRef {
                 name: "secret".to_string(),
@@ -206,6 +211,7 @@ mod tests {
 
         let json = serde_json::to_string(&source).unwrap();
         assert!(!json.contains(r#""role""#));
+        assert!(!json.contains(r#""schema""#));
     }
 
     #[test]
@@ -252,6 +258,7 @@ mod tests {
             user: "u".to_string(),
             warehouse: "w".to_string(),
             database: "d".to_string(),
+            schema: None,
             role: None,
             credential: Credential::None,
         };
@@ -274,6 +281,7 @@ mod tests {
             user: "u".to_string(),
             warehouse: "w".to_string(),
             database: "d".to_string(),
+            schema: None,
             role: None,
             credential: Credential::None,
         };
