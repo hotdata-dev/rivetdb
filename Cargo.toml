@@ -10,8 +10,7 @@ path = "src/bin/server.rs"
 [dependencies]
 datafusion = "50.2"
 duckdb = { version = "1.4", features = ["bundled"] }
-sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "chrono", "tls-rustls"] }
-rustyline = "17.0"
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "sqlite", "mysql", "chrono", "tls-rustls"] }
 tokio = { version = "1.47", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -21,24 +20,34 @@ async-trait = "0.1"
 tempfile = "3"
 futures = "0.3"
 log = "0.4"
-env_logger = "0.11"
 clap = { version = "4.5", features = ["derive"] }
-arrow-csv = "56.2"
 arrow-json = "56.2"
 arrow-schema = { version = "56.2", features = ["serde"] }
 object_store = { version = "0.12", features = ["aws"] }
 url = "2.5"
 axum = "0.8.7"
 tower = { version = "0.5.2", features = ["util"] }
-tower-http = { version = "0.6.6", features = ["trace", "cors"] }
 config = "0.15.19"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2.0.17"
 uuid = { version = "1.11", features = ["v4"] }
 urlencoding = "2.1"
+aes-gcm-siv = "0.11"
+base64 = "0.22"
+iceberg = "0.7"
+iceberg-catalog-rest = "0.7"
+iceberg-catalog-glue = "0.7"
+snowflake-api = "0.11"
+# Arrow 55 for iceberg compatibility (iceberg uses arrow 55, datafusion uses arrow 56)
+arrow-array-55 = { package = "arrow-array", version = "55" }
+arrow-ipc-55 = { package = "arrow-ipc", version = "55" }
+# Arrow 54 for snowflake-api compatibility (snowflake-api uses arrow 54)
+arrow-array-54 = { package = "arrow-array", version = "54" }
+arrow-ipc-54 = { package = "arrow-ipc", version = "54" }
 
 [dev-dependencies]
-testcontainers = "0.23"
-testcontainers-modules = { version = "0.11", features = ["postgres"] }
-proptest = "1.6"
+testcontainers = "0.26.3"
+testcontainers-modules = { version = "0.14.0", features = ["postgres", "minio", "mysql"] }
+rand = "0.8"
+reqwest = { version = "0.13.1", features = ["json"] }

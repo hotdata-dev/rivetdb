@@ -5,33 +5,40 @@ use axum::{
     http::{Request, StatusCode},
     Router,
 };
-use rivetdb::datafusion::HotDataEngine;
-use rivetdb::http::app_server::{AppServer, PATH_CONNECTIONS, PATH_QUERY, PATH_TABLES};
+use base64::{engine::general_purpose::STANDARD, Engine};
+use rand::RngCore;
+use rivetdb::http::app_server::{
+    AppServer, PATH_CONNECTIONS, PATH_CONNECTION_DISCOVER, PATH_QUERY, PATH_SECRET, PATH_SECRETS,
+    PATH_TABLES,
+};
+use rivetdb::RivetEngine;
 use serde_json::json;
 use tempfile::TempDir;
 use tower::util::ServiceExt;
 
-/// Create test router with in-memory engine
-fn setup_test() -> Result<(Router, TempDir)> {
-    let temp_dir = tempfile::tempdir()?;
-    let metadata_dir = temp_dir.path().to_path_buf();
-    let catalog_path = metadata_dir.join("catalog.db");
-    let cache_path = metadata_dir.join("cache");
-    let state_path = metadata_dir.join("state");
+/// Generate a test secret key (base64-encoded 32 bytes)
+fn generate_test_secret_key() -> String {
+    let mut key = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut key);
+    STANDARD.encode(key)
+}
 
-    let engine = HotDataEngine::new_with_paths(
-        catalog_path.to_str().unwrap(),
-        cache_path.to_str().unwrap(),
-        state_path.to_str().unwrap(),
-        false,
-    )?;
+/// Create test router with in-memory engine
+async fn setup_test() -> Result<(Router, TempDir)> {
+    let temp_dir = tempfile::tempdir()?;
+
+    let engine = RivetEngine::builder()
+        .base_dir(temp_dir.path())
+        .secret_key(generate_test_secret_key())
+        .build()
+        .await?;
 
     let app = AppServer::new(engine);
 
     Ok((app.router, temp_dir))
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_query_endpoint_simple_select() -> Result<()> {
     let response = _send_query("SELECT 1 as num, 'hello' as text").await?;
 
@@ -50,7 +57,7 @@ async fn test_query_endpoint_simple_select() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_query_endpoint_multiple_rows() -> Result<()> {
     let response =
         _send_query("SELECT * FROM (VALUES (1, 'a'), (2, 'b'), (3, 'c')) AS t(id, name)").await?;
@@ -75,7 +82,7 @@ async fn test_query_endpoint_multiple_rows() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::approx_constant)]
 async fn test_query_endpoint_different_data_types() -> Result<()> {
     let response =
@@ -102,7 +109,7 @@ async fn test_query_endpoint_different_data_types() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_query_endpoint_null_values() -> Result<()> {
     let response = _send_query("SELECT NULL as null_col, 1 as int_col").await?;
 
@@ -121,7 +128,7 @@ async fn test_query_endpoint_null_values() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_query_endpoint_empty_result() -> Result<()> {
     let response = _send_query("SELECT 1 as num WHERE 1 = 0").await?;
 
@@ -137,7 +144,7 @@ async fn test_query_endpoint_empty_result() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_query_endpoint_invalid_sql_text() -> Result<()> {
     let queries = vec!["", "   \n\t  "];
 
@@ -156,7 +163,7 @@ async fn test_query_endpoint_invalid_sql_text() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_query_endpoint_invalid_sql() -> Result<()> {
     let response = _send_query("SELECT * FROM nonexistent_table_12345").await?;
 
@@ -172,9 +179,9 @@ async fn test_query_endpoint_invalid_sql() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_query_endpoint_malformed_json() -> Result<()> {
-    let (app, _tempdir) = setup_test()?;
+    let (app, _tempdir) = setup_test().await?;
 
     let response = app
         .oneshot(
@@ -191,9 +198,9 @@ async fn test_query_endpoint_malformed_json() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_query_endpoint_missing_sql_field() -> Result<()> {
-    let (app, _tempdir) = setup_test()?;
+    let (app, _tempdir) = setup_test().await?;
 
     let response = app
         .oneshot(
@@ -213,9 +220,9 @@ async fn test_query_endpoint_missing_sql_field() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_tables_endpoint_empty() -> Result<()> {
-    let (app, _tempdir) = setup_test()?;
+    let (app, _tempdir) = setup_test().await?;
 
     let response = app
         .oneshot(
@@ -238,9 +245,9 @@ async fn test_tables_endpoint_empty() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_tables_endpoint_with_connection_filter_not_found() -> Result<()> {
-    let (app, _tempdir) = setup_test()?;
+    let (app, _tempdir) = setup_test().await?;
 
     let response = app
         .oneshot(
@@ -265,7 +272,7 @@ async fn test_tables_endpoint_with_connection_filter_not_found() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_query_endpoint_aggregate_functions() -> Result<()> {
     let sql = "\
         SELECT COUNT(*) as count, SUM(val) as total, AVG(val) as average \
@@ -286,7 +293,7 @@ async fn test_query_endpoint_aggregate_functions() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_query_endpoint_group_by() -> Result<()> {
     let sql = "\
         SELECT category, COUNT(*) as count \
@@ -310,7 +317,7 @@ async fn test_query_endpoint_group_by() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_query_endpoint_joins() -> Result<()> {
     let sql = "SELECT a.id, a.name, b.value FROM (VALUES \
     (1, 'Alice'), \
@@ -335,7 +342,7 @@ async fn test_query_endpoint_joins() -> Result<()> {
 }
 
 async fn _send_query(sql: &str) -> Result<Response> {
-    let (app, _tempdir) = setup_test()?;
+    let (app, _tempdir) = setup_test().await?;
 
     let response = app
         .oneshot(
@@ -353,9 +360,9 @@ async fn _send_query(sql: &str) -> Result<Response> {
 
 // ==================== Connection Endpoint Tests ====================
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_list_connections_empty() -> Result<()> {
-    let (app, _tempdir) = setup_test()?;
+    let (app, _tempdir) = setup_test().await?;
 
     let response = app
         .oneshot(
@@ -377,9 +384,9 @@ async fn test_list_connections_empty() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_create_connection_empty_name() -> Result<()> {
-    let (app, _tempdir) = setup_test()?;
+    let (app, _tempdir) = setup_test().await?;
 
     let response = app
         .oneshot(
@@ -405,9 +412,9 @@ async fn test_create_connection_empty_name() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_create_connection_unsupported_source_type() -> Result<()> {
-    let (app, _tempdir) = setup_test()?;
+    let (app, _tempdir) = setup_test().await?;
 
     let response = app
         .oneshot(
@@ -417,7 +424,7 @@ async fn test_create_connection_unsupported_source_type() -> Result<()> {
                 .header("content-type", "application/json")
                 .body(Body::from(serde_json::to_string(&json!({
                     "name": "test_conn",
-                    "source_type": "mysql",
+                    "source_type": "oracle",
                     "config": {}
                 }))?))?,
         )
@@ -428,17 +435,16 @@ async fn test_create_connection_unsupported_source_type() -> Result<()> {
     let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
     let json: serde_json::Value = serde_json::from_slice(&body)?;
 
-    assert!(json["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("postgres"));
+    // Check that error mentions supported source types
+    let error_msg = json["error"]["message"].as_str().unwrap();
+    assert!(error_msg.contains("postgres") || error_msg.contains("mysql"));
 
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_create_connection_missing_fields() -> Result<()> {
-    let (app, _tempdir) = setup_test()?;
+    let (app, _tempdir) = setup_test().await?;
 
     let response = app
         .oneshot(
@@ -454,6 +460,794 @@ async fn test_create_connection_missing_fields() -> Result<()> {
 
     // Axum returns UNPROCESSABLE_ENTITY (422) when required fields are missing
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    Ok(())
+}
+
+// ==================== Secret Endpoint Tests ====================
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_list_secrets_empty() -> Result<()> {
+    let (app, _tempdir) = setup_test().await?;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(PATH_SECRETS)
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    assert!(json["secrets"].is_array());
+    assert_eq!(json["secrets"].as_array().unwrap().len(), 0);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_create_and_get_secret() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let engine = RivetEngine::builder()
+        .base_dir(temp_dir.path())
+        .secret_key(generate_test_secret_key())
+        .build()
+        .await?;
+    let app = AppServer::new(engine);
+
+    // Create a secret
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_SECRETS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "name": "test_secret",
+                    "value": "super_secret_value"
+                }))?))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    assert_eq!(json["name"], "test_secret");
+    assert!(json["created_at"].is_string());
+
+    // Fetch the secret metadata
+    let secret_path = PATH_SECRET.replace("{name}", "test_secret");
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(&secret_path)
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    assert_eq!(json["name"], "test_secret");
+    assert!(json["created_at"].is_string());
+    assert!(json["updated_at"].is_string());
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_list_secrets_after_create() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let engine = RivetEngine::builder()
+        .base_dir(temp_dir.path())
+        .secret_key(generate_test_secret_key())
+        .build()
+        .await?;
+    let app = AppServer::new(engine);
+
+    // Create two secrets
+    for name in ["secret_one", "secret_two"] {
+        let response = app
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(PATH_SECRETS)
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&json!({
+                        "name": name,
+                        "value": format!("value_for_{}", name)
+                    }))?))?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+
+    // List secrets
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(PATH_SECRETS)
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    let secrets = json["secrets"].as_array().unwrap();
+    assert_eq!(secrets.len(), 2);
+
+    let names: Vec<&str> = secrets
+        .iter()
+        .map(|s| s["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"secret_one"));
+    assert!(names.contains(&"secret_two"));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_delete_secret() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let engine = RivetEngine::builder()
+        .base_dir(temp_dir.path())
+        .secret_key(generate_test_secret_key())
+        .build()
+        .await?;
+    let app = AppServer::new(engine);
+
+    // Create a secret
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_SECRETS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "name": "to_delete",
+                    "value": "will_be_deleted"
+                }))?))?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    // Delete the secret
+    let secret_path = PATH_SECRET.replace("{name}", "to_delete");
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(&secret_path)
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    // Verify it's gone by listing
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(PATH_SECRETS)
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    assert_eq!(json["secrets"].as_array().unwrap().len(), 0);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_get_nonexistent_secret() -> Result<()> {
+    let (app, _tempdir) = setup_test().await?;
+
+    let secret_path = PATH_SECRET.replace("{name}", "does_not_exist");
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(&secret_path)
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    assert!(json["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("not found"));
+    assert_eq!(json["error"]["code"], "NOT_FOUND");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_delete_nonexistent_secret() -> Result<()> {
+    let (app, _tempdir) = setup_test().await?;
+
+    let secret_path = PATH_SECRET.replace("{name}", "does_not_exist");
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(&secret_path)
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_create_secret_missing_fields() -> Result<()> {
+    let (app, _tempdir) = setup_test().await?;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_SECRETS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "name": "test_secret"
+                    // missing "value" field
+                }))?))?,
+        )
+        .await?;
+
+    // Axum returns UNPROCESSABLE_ENTITY (422) when required fields are missing
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_update_secret() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let engine = RivetEngine::builder()
+        .base_dir(temp_dir.path())
+        .secret_key(generate_test_secret_key())
+        .build()
+        .await?;
+    let app = AppServer::new(engine);
+
+    // Create a secret
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_SECRETS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "name": "test_secret",
+                    "value": "original_value"
+                }))?))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let create_json: serde_json::Value = serde_json::from_slice(&body)?;
+    let created_at = create_json["created_at"].as_str().unwrap();
+
+    // Small delay to ensure updated_at will be different
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+    // Update the secret
+    let secret_path = PATH_SECRET.replace("{name}", "test_secret");
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(&secret_path)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "value": "updated_value"
+                }))?))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let update_json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    assert_eq!(update_json["name"], "test_secret");
+    assert!(update_json["updated_at"].is_string());
+
+    // Verify updated_at is different from created_at
+    let updated_at = update_json["updated_at"].as_str().unwrap();
+    assert_ne!(
+        created_at, updated_at,
+        "updated_at should change after update"
+    );
+
+    // Verify the new value can be retrieved via the manager
+    let secret_value = app.engine.secret_manager().get("test_secret").await?;
+    assert_eq!(secret_value, b"updated_value");
+
+    // Verify metadata via GET shows updated timestamps
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(&secret_path)
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let get_json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    assert_eq!(get_json["updated_at"].as_str().unwrap(), updated_at);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_update_nonexistent_secret() -> Result<()> {
+    let (app, _tempdir) = setup_test().await?;
+
+    let secret_path = PATH_SECRET.replace("{name}", "does_not_exist");
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(&secret_path)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "value": "some_value"
+                }))?))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    assert!(json["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("not found"));
+    assert_eq!(json["error"]["code"], "NOT_FOUND");
+
+    Ok(())
+}
+
+// ==================== Decoupled Registration/Discovery Tests ====================
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_create_connection_registers_even_when_discovery_fails() -> Result<()> {
+    let (app, _tempdir) = setup_test().await?;
+
+    // Create a postgres connection with invalid credentials - registration should
+    // succeed but discovery should fail
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_CONNECTIONS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "name": "my_pg",
+                    "source_type": "postgres",
+                    "config": {
+                        "host": "localhost",
+                        "port": 5432,
+                        "user": "nonexistent_user",
+                        "password": "bad_password",
+                        "database": "nonexistent_db"
+                    }
+                }))?))?,
+        )
+        .await?;
+
+    // Should return 201 CREATED (connection was registered)
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    // Verify response structure
+    assert_eq!(json["name"], "my_pg");
+    assert_eq!(json["source_type"], "postgres");
+    assert_eq!(json["tables_discovered"], 0);
+    assert_eq!(json["discovery_status"], "failed");
+    assert!(json["discovery_error"].is_string());
+
+    // Verify connection exists by listing connections
+    let list_response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(PATH_CONNECTIONS)
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(list_response.status(), StatusCode::OK);
+
+    let list_body = axum::body::to_bytes(list_response.into_body(), usize::MAX).await?;
+    let list_json: serde_json::Value = serde_json::from_slice(&list_body)?;
+
+    assert_eq!(list_json["connections"].as_array().unwrap().len(), 1);
+    assert_eq!(list_json["connections"][0]["name"], "my_pg");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_discover_connection_not_found() -> Result<()> {
+    let (app, _tempdir) = setup_test().await?;
+
+    let discover_path = PATH_CONNECTION_DISCOVER.replace("{name}", "nonexistent");
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(&discover_path)
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    assert!(json["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("not found"));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_discover_connection_retry_after_failed_discovery() -> Result<()> {
+    let (app, _tempdir) = setup_test().await?;
+
+    // First create a connection with invalid credentials
+    let create_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_CONNECTIONS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "name": "retry_conn",
+                    "source_type": "postgres",
+                    "config": {
+                        "host": "localhost",
+                        "port": 5432,
+                        "user": "bad_user",
+                        "password": "bad_pass",
+                        "database": "bad_db"
+                    }
+                }))?))?,
+        )
+        .await?;
+
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+
+    // Now try to discover again via the discover endpoint
+    let discover_path = PATH_CONNECTION_DISCOVER.replace("{name}", "retry_conn");
+
+    let discover_response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(&discover_path)
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    // Should return 200 OK (endpoint works, even though discovery fails)
+    assert_eq!(discover_response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(discover_response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    // Verify response structure for discover endpoint
+    assert_eq!(json["name"], "retry_conn");
+    assert_eq!(json["tables_discovered"], 0);
+    assert_eq!(json["discovery_status"], "failed");
+    assert!(json["discovery_error"].is_string());
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_create_connection_duplicate_name_rejected() -> Result<()> {
+    let (app, _tempdir) = setup_test().await?;
+
+    // Create first connection (will fail discovery but register successfully)
+    let first_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_CONNECTIONS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "name": "dup_conn",
+                    "source_type": "postgres",
+                    "config": {
+                        "host": "localhost",
+                        "port": 5432,
+                        "user": "user1",
+                        "password": "pass1",
+                        "database": "db1"
+                    }
+                }))?))?,
+        )
+        .await?;
+
+    assert_eq!(first_response.status(), StatusCode::CREATED);
+
+    // Try to create another connection with the same name
+    let second_response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_CONNECTIONS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "name": "dup_conn",
+                    "source_type": "postgres",
+                    "config": {
+                        "host": "localhost",
+                        "port": 5432,
+                        "user": "user2",
+                        "password": "pass2",
+                        "database": "db2"
+                    }
+                }))?))?,
+        )
+        .await?;
+
+    // Should be rejected as conflict
+    assert_eq!(second_response.status(), StatusCode::CONFLICT);
+
+    let body = axum::body::to_bytes(second_response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    assert!(json["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("already exists"));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_create_connection_successful_discovery() -> Result<()> {
+    let (app, tempdir) = setup_test().await?;
+
+    // Create a DuckDB file with a table
+    let db_path = tempdir.path().join("test.duckdb");
+    {
+        let conn = duckdb::Connection::open(&db_path)?;
+        conn.execute_batch(
+            "CREATE TABLE users (id INTEGER, name VARCHAR);
+             INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob');",
+        )?;
+    }
+
+    // Create connection via API
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_CONNECTIONS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "name": "test_duck",
+                    "source_type": "duckdb",
+                    "config": {
+                        "path": db_path.to_str().unwrap()
+                    }
+                }))?))?,
+        )
+        .await?;
+
+    // Should return 201 CREATED
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    // Verify successful discovery response
+    assert_eq!(json["name"], "test_duck");
+    assert_eq!(json["source_type"], "duckdb");
+    assert_eq!(json["tables_discovered"], 1);
+    assert_eq!(json["discovery_status"], "success");
+    // discovery_error should not be present on success
+    assert!(json["discovery_error"].is_null());
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_discover_connection_successful() -> Result<()> {
+    let (app, tempdir) = setup_test().await?;
+
+    // Create a DuckDB file with a table
+    let db_path = tempdir.path().join("discover_test.duckdb");
+    {
+        let conn = duckdb::Connection::open(&db_path)?;
+        conn.execute_batch("CREATE TABLE orders (id INTEGER, amount DECIMAL);")?;
+    }
+
+    // First create the connection
+    let create_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_CONNECTIONS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "name": "discover_duck",
+                    "source_type": "duckdb",
+                    "config": {
+                        "path": db_path.to_str().unwrap()
+                    }
+                }))?))?,
+        )
+        .await?;
+
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+
+    // Now call discover endpoint (even though already discovered, it should work)
+    let discover_path = PATH_CONNECTION_DISCOVER.replace("{name}", "discover_duck");
+
+    let discover_response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(&discover_path)
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(discover_response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(discover_response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    // Verify successful discover response
+    assert_eq!(json["name"], "discover_duck");
+    assert_eq!(json["tables_discovered"], 1);
+    assert_eq!(json["discovery_status"], "success");
+    assert!(json["discovery_error"].is_null());
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_create_connection_with_password_auto_creates_secret() -> Result<()> {
+    let (app, _tempdir) = setup_test().await?;
+
+    // Create a postgres connection with password field (old API format)
+    // Discovery will fail (no postgres server), but the secret should be created
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_CONNECTIONS)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "name": "my_pg",
+                    "source_type": "postgres",
+                    "config": {
+                        "host": "localhost",
+                        "port": 5432,
+                        "user": "testuser",
+                        "password": "testpassword123",
+                        "database": "testdb"
+                    }
+                }))?))?,
+        )
+        .await?;
+
+    // Connection should be created (discovery will fail, but that's expected)
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    assert_eq!(json["name"], "my_pg");
+    assert_eq!(json["source_type"], "postgres");
+    // Discovery fails because no postgres server, but the important thing is it's not
+    // "no credential configured" - it should be a connection error
+    assert_eq!(json["discovery_status"], "failed");
+    let error = json["discovery_error"].as_str().unwrap();
+    assert!(
+        !error.contains("no credential configured"),
+        "Error should not be 'no credential configured', got: {}",
+        error
+    );
+
+    // Verify the secret was auto-created with the expected name
+    let secrets_response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(PATH_SECRETS)
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(secrets_response.status(), StatusCode::OK);
+
+    let secrets_body = axum::body::to_bytes(secrets_response.into_body(), usize::MAX).await?;
+    let secrets_json: serde_json::Value = serde_json::from_slice(&secrets_body)?;
+
+    let secrets = secrets_json["secrets"].as_array().unwrap();
+    assert_eq!(
+        secrets.len(),
+        1,
+        "Expected exactly one secret to be created"
+    );
+    assert_eq!(
+        secrets[0]["name"], "conn-my_pg-password",
+        "Secret should be named 'conn-my_pg-password'"
+    );
 
     Ok(())
 }

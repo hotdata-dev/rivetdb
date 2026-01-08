@@ -8,6 +8,8 @@ pub struct AppConfig {
     pub storage: StorageConfig,
     #[serde(default)]
     pub paths: PathsConfig,
+    #[serde(default)]
+    pub secrets: SecretsConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -48,8 +50,18 @@ pub struct StorageConfig {
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct PathsConfig {
+    /// Base directory for all RivetDB data (catalog.db, cache/).
+    /// Defaults to ~/.hotdata/rivetdb
+    pub base_dir: Option<String>,
+    /// Cache directory for Parquet files. Defaults to {base_dir}/cache
     pub cache_dir: Option<String>,
-    pub state_dir: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct SecretsConfig {
+    /// Encryption key for secrets (base64-encoded 32-byte key).
+    /// Can also be set via RIVETDB_SECRET_KEY environment variable.
+    pub encryption_key: Option<String>,
 }
 
 impl AppConfig {
@@ -94,8 +106,8 @@ impl AppConfig {
                     anyhow::bail!("Postgres catalog requires 'password'");
                 }
             }
-            "duckdb" => {
-                // DuckDB uses paths config, no additional validation needed
+            "sqlite" => {
+                // SQLite uses paths config, no additional validation needed
             }
             _ => anyhow::bail!("Invalid catalog type: {}", self.catalog.catalog_type),
         }

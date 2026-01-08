@@ -50,10 +50,13 @@ Alternatively/additionally, you can build and run locally:
 - Rust-powered engine focused on performance and correctness  
 - Basic caching and early internal APIs  
 - Initial examples and tests  
-- **Current adapter support:**  
-  - **Postgres**  
-  - **DuckDB**  
-  - **MotherDuck**  
+- **Current adapter support:**
+  - **Postgres**
+  - **MySQL**
+  - **DuckDB**
+  - **MotherDuck**
+  - **Apache Iceberg** (REST and Glue catalogs)
+  - **Snowflake**  
 
 This foundation supports the larger roadmap described below.
 
@@ -145,6 +148,6 @@ These represent emerging priorities after the first public preview:
 | Arrow Flight SQL | Planned |
 | RivetDB CLI | Planned |
 | Cache | Alpha |
-| Current Connectors: Postgres, DuckDB, MotherDuck | Alpha |
+| Current Connectors: Postgres, MySQL, DuckDB, MotherDuck, Iceberg, Snowflake | Alpha |
 | Observability | Backlog |
 | Additional Connectors | Backlog |

@@ -1,11 +1,13 @@
-use crate::datafusion::HotDataEngine;
 use crate::http::error::ApiError;
 use crate::http::models::{
-    ConnectionInfo, CreateConnectionRequest, CreateConnectionResponse, GetConnectionResponse,
-    ListConnectionsResponse, QueryRequest, QueryResponse, TableInfo, TablesResponse,
+    ConnectionInfo, CreateConnectionRequest, CreateConnectionResponse, CreateSecretRequest,
+    CreateSecretResponse, DiscoverConnectionResponse, DiscoveryStatus, GetConnectionResponse,
+    GetSecretResponse, ListConnectionsResponse, ListSecretsResponse, QueryRequest, QueryResponse,
+    SecretMetadataResponse, TableInfo, TablesResponse, UpdateSecretRequest, UpdateSecretResponse,
 };
 use crate::http::serialization::{encode_value_at, make_array_encoder};
 use crate::source::Source;
+use crate::RivetEngine;
 use axum::{
     extract::{Path, Query as QueryParams, State},
     http::StatusCode,
@@ -19,7 +21,7 @@ use tracing::error;
 
 /// Handler for POST /query
 pub async fn query_handler(
-    State(engine): State<Arc<HotDataEngine>>,
+    State(engine): State<Arc<RivetEngine>>,
     Json(request): Json<QueryRequest>,
 ) -> Result<Json<QueryResponse>, ApiError> {
     // Validate SQL is not empty
@@ -83,7 +85,7 @@ pub async fn query_handler(
 
 /// Handler for GET /tables
 pub async fn tables_handler(
-    State(engine): State<Arc<HotDataEngine>>,
+    State(engine): State<Arc<RivetEngine>>,
     QueryParams(params): QueryParams<HashMap<String, String>>,
 ) -> Result<Json<TablesResponse>, ApiError> {
     // Get optional connection filter
@@ -93,7 +95,7 @@ pub async fn tables_handler(
     // todo: add exists method to engine/catalog;
     // todo: consider accepting connection_id instead?
     if let Some(conn_name) = connection_filter {
-        let connections = engine.list_connections()?;
+        let connections = engine.list_connections().await?;
         if !connections.iter().any(|c| c.name == conn_name) {
             return Err(ApiError::not_found(format!(
                 "Connection '{}' not found",
@@ -103,10 +105,10 @@ pub async fn tables_handler(
     }
 
     // Get tables from engine
-    let tables = engine.list_tables(connection_filter)?;
+    let tables = engine.list_tables(connection_filter).await?;
 
     // Get all connections to map connection_id to connection name
-    let connections = engine.list_connections()?;
+    let connections = engine.list_connections().await?;
     let connection_map: HashMap<i32, String> =
         connections.into_iter().map(|c| (c.id, c.name)).collect();
 
@@ -145,7 +147,7 @@ pub async fn health_handler() -> (StatusCode, Json<serde_json::Value>) {
 
 /// Handler for POST /connections
 pub async fn create_connection_handler(
-    State(engine): State<Arc<HotDataEngine>>,
+    State(engine): State<Arc<RivetEngine>>,
     Json(request): Json<CreateConnectionRequest>,
 ) -> Result<(StatusCode, Json<CreateConnectionResponse>), ApiError> {
     // Validate name is not empty
@@ -156,7 +158,8 @@ pub async fn create_connection_handler(
     // Check if connection already exists
     // todo: add "exists" method
     if engine
-        .list_connections()?
+        .list_connections()
+        .await?
         .iter()
         .any(|c| c.name == request.name)
     {
@@ -166,12 +169,41 @@ pub async fn create_connection_handler(
         )));
     }
 
-    // Merge source_type into config as "type" for Source enum deserialization
+    // Build config object, handling password-to-secret conversion
     let config_with_type = {
         let mut obj = match request.config {
             serde_json::Value::Object(m) => m,
             _ => return Err(ApiError::bad_request("Configuration must be a JSON object")),
         };
+
+        // If "password" is provided, auto-create a secret and replace with credential ref
+        if let Some(password_value) = obj.remove("password") {
+            if let Some(password) = password_value.as_str() {
+                if !password.is_empty() {
+                    // Generate secret name from connection name
+                    let secret_name = format!("conn-{}-password", request.name);
+
+                    // Create the secret
+                    engine
+                        .secret_manager()
+                        .create(&secret_name, password.as_bytes())
+                        .await
+                        .map_err(|e| {
+                            ApiError::internal_error(format!("Failed to store password: {}", e))
+                        })?;
+
+                    // Replace password with credential reference
+                    obj.insert(
+                        "credential".to_string(),
+                        serde_json::json!({
+                            "type": "secret_ref",
+                            "name": secret_name
+                        }),
+                    );
+                }
+            }
+        }
+
         obj.insert(
             "type".to_string(),
             serde_json::Value::String(request.source_type.clone()),
@@ -185,27 +217,33 @@ pub async fn create_connection_handler(
 
     let source_type = source.source_type().to_string();
 
-    // Attempt to connect (discovers tables and registers catalog)
-    engine.connect(&request.name, source).await.map_err(|e| {
-        error!("Failed to connect to database: {}", e);
-        // Extract root cause message only - don't expose full stack trace to clients
-        let root_cause = e.root_cause().to_string();
-        let msg = root_cause.lines().next().unwrap_or("Unknown error");
+    // Step 1: Register the connection
+    engine
+        .register_connection(&request.name, source)
+        .await
+        .map_err(|e| {
+            error!("Failed to register connection: {}", e);
+            ApiError::internal_error(format!("Failed to register connection: {}", e))
+        })?;
 
-        if msg.contains("Failed to connect") || msg.contains("connection refused") {
-            ApiError::bad_gateway(format!("Failed to connect to database: {}", msg))
-        } else if msg.contains("Unsupported source type") || msg.contains("Invalid configuration") {
-            ApiError::bad_request(msg.to_string())
-        } else {
-            ApiError::bad_gateway(format!("Failed to connect to database: {}", msg))
-        }
-    })?;
-
-    // Count discovered tables
-    let tables_discovered = engine
-        .list_tables(Some(&request.name))
-        .map(|t| t.len())
-        .unwrap_or(0);
+    // Step 2: Attempt discovery - catch errors and return partial success
+    let (tables_discovered, discovery_status, discovery_error) =
+        match engine.discover_connection(&request.name).await {
+            Ok(count) => (count, DiscoveryStatus::Success, None),
+            Err(e) => {
+                let root_cause = e.root_cause().to_string();
+                let msg = root_cause
+                    .lines()
+                    .next()
+                    .unwrap_or("Unknown error")
+                    .to_string();
+                error!(
+                    "Discovery failed for connection '{}': {}",
+                    request.name, msg
+                );
+                (0, DiscoveryStatus::Failed, Some(msg))
+            }
+        };
 
     Ok((
         StatusCode::CREATED,
@@ -213,15 +251,54 @@ pub async fn create_connection_handler(
             name: request.name,
             source_type,
             tables_discovered,
+            discovery_status,
+            discovery_error,
         }),
     ))
 }
 
+/// Handler for POST /connections/{name}/discover
+pub async fn discover_connection_handler(
+    State(engine): State<Arc<RivetEngine>>,
+    Path(name): Path<String>,
+) -> Result<Json<DiscoverConnectionResponse>, ApiError> {
+    // Validate connection exists
+    if engine.catalog().get_connection(&name).await?.is_none() {
+        return Err(ApiError::not_found(format!(
+            "Connection '{}' not found",
+            name
+        )));
+    }
+
+    // Attempt discovery
+    let (tables_discovered, discovery_status, discovery_error) =
+        match engine.discover_connection(&name).await {
+            Ok(count) => (count, DiscoveryStatus::Success, None),
+            Err(e) => {
+                let root_cause = e.root_cause().to_string();
+                let msg = root_cause
+                    .lines()
+                    .next()
+                    .unwrap_or("Unknown error")
+                    .to_string();
+                error!("Discovery failed for connection '{}': {}", name, msg);
+                (0, DiscoveryStatus::Failed, Some(msg))
+            }
+        };
+
+    Ok(Json(DiscoverConnectionResponse {
+        name,
+        tables_discovered,
+        discovery_status,
+        discovery_error,
+    }))
+}
+
 /// Handler for GET /connections
 pub async fn list_connections_handler(
-    State(engine): State<Arc<HotDataEngine>>,
+    State(engine): State<Arc<RivetEngine>>,
 ) -> Result<Json<ListConnectionsResponse>, ApiError> {
-    let connections = engine.list_connections()?;
+    let connections = engine.list_connections().await?;
 
     let connection_infos: Vec<ConnectionInfo> = connections
         .into_iter()
@@ -239,17 +316,18 @@ pub async fn list_connections_handler(
 
 /// Handler for GET /connections/{name}
 pub async fn get_connection_handler(
-    State(engine): State<Arc<HotDataEngine>>,
+    State(engine): State<Arc<RivetEngine>>,
     Path(name): Path<String>,
 ) -> Result<Json<GetConnectionResponse>, ApiError> {
     // Get connection info
     let conn = engine
         .catalog()
-        .get_connection(&name)?
+        .get_connection(&name)
+        .await?
         .ok_or_else(|| ApiError::not_found(format!("Connection '{}' not found", name)))?;
 
     // Get table counts
-    let tables = engine.list_tables(Some(&name))?;
+    let tables = engine.list_tables(Some(&name)).await?;
     let table_count = tables.len();
     let synced_table_count = tables.iter().filter(|t| t.parquet_path.is_some()).count();
 
@@ -264,7 +342,7 @@ pub async fn get_connection_handler(
 
 /// Handler for DELETE /connections/{name}
 pub async fn delete_connection_handler(
-    State(engine): State<Arc<HotDataEngine>>,
+    State(engine): State<Arc<RivetEngine>>,
     Path(name): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     engine.remove_connection(&name).await.map_err(|e| {
@@ -280,7 +358,7 @@ pub async fn delete_connection_handler(
 
 /// Handler for DELETE /connections/{name}/cache
 pub async fn purge_connection_cache_handler(
-    State(engine): State<Arc<HotDataEngine>>,
+    State(engine): State<Arc<RivetEngine>>,
     Path(name): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     engine.purge_connection(&name).await.map_err(|e| {
@@ -304,7 +382,7 @@ pub struct TableCachePath {
 
 /// Handler for DELETE /connections/{name}/tables/{schema}/{table}/cache
 pub async fn purge_table_cache_handler(
-    State(engine): State<Arc<HotDataEngine>>,
+    State(engine): State<Arc<RivetEngine>>,
     Path(params): Path<TableCachePath>,
 ) -> Result<StatusCode, ApiError> {
     engine
@@ -318,6 +396,94 @@ pub async fn purge_table_cache_handler(
                 ApiError::internal_error(msg)
             }
         })?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// Secret management handlers
+
+/// Handler for POST /secrets
+pub async fn create_secret_handler(
+    State(engine): State<Arc<RivetEngine>>,
+    Json(request): Json<CreateSecretRequest>,
+) -> Result<(StatusCode, Json<CreateSecretResponse>), ApiError> {
+    let secret_manager = engine.secret_manager();
+
+    secret_manager
+        .create(&request.name, request.value.as_bytes())
+        .await?;
+
+    let metadata = secret_manager.get_metadata(&request.name).await?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(CreateSecretResponse {
+            name: metadata.name,
+            created_at: metadata.created_at,
+        }),
+    ))
+}
+
+/// Handler for PUT /secrets/{name}
+pub async fn update_secret_handler(
+    State(engine): State<Arc<RivetEngine>>,
+    Path(name): Path<String>,
+    Json(request): Json<UpdateSecretRequest>,
+) -> Result<Json<UpdateSecretResponse>, ApiError> {
+    let secret_manager = engine.secret_manager();
+
+    secret_manager
+        .update(&name, request.value.as_bytes())
+        .await?;
+
+    let metadata = secret_manager.get_metadata(&name).await?;
+
+    Ok(Json(UpdateSecretResponse {
+        name: metadata.name,
+        updated_at: metadata.updated_at,
+    }))
+}
+
+/// Handler for GET /secrets
+pub async fn list_secrets_handler(
+    State(engine): State<Arc<RivetEngine>>,
+) -> Result<Json<ListSecretsResponse>, ApiError> {
+    let secret_manager = engine.secret_manager();
+
+    let secrets = secret_manager.list().await?;
+
+    Ok(Json(ListSecretsResponse {
+        secrets: secrets
+            .into_iter()
+            .map(SecretMetadataResponse::from)
+            .collect(),
+    }))
+}
+
+/// Handler for GET /secrets/{name}
+pub async fn get_secret_handler(
+    State(engine): State<Arc<RivetEngine>>,
+    Path(name): Path<String>,
+) -> Result<Json<GetSecretResponse>, ApiError> {
+    let secret_manager = engine.secret_manager();
+
+    let metadata = secret_manager.get_metadata(&name).await?;
+
+    Ok(Json(GetSecretResponse {
+        name: metadata.name,
+        created_at: metadata.created_at,
+        updated_at: metadata.updated_at,
+    }))
+}
+
+/// Handler for DELETE /secrets/{name}
+pub async fn delete_secret_handler(
+    State(engine): State<Arc<RivetEngine>>,
+    Path(name): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let secret_manager = engine.secret_manager();
+
+    secret_manager.delete(&name).await?;
 
     Ok(StatusCode::NO_CONTENT)
 }

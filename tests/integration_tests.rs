@@ -10,9 +10,9 @@ use axum::{
     http::{Request, StatusCode},
     Router,
 };
-use rivetdb::datafusion::HotDataEngine;
 use rivetdb::http::app_server::{AppServer, PATH_CONNECTIONS, PATH_QUERY, PATH_TABLES};
 use rivetdb::source::Source;
+use rivetdb::RivetEngine;
 use serde_json::json;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -29,7 +29,7 @@ struct QueryResult {
 }
 
 impl QueryResult {
-    fn from_engine(response: &rivetdb::datafusion::QueryResponse) -> Self {
+    fn from_engine(response: &rivetdb::QueryResponse) -> Self {
         let batch = response.results.first();
 
         let (columns, row_count) = match batch {
@@ -242,7 +242,7 @@ trait TestExecutor: Send + Sync {
 
 /// Engine-based test executor.
 struct EngineExecutor {
-    engine: Arc<HotDataEngine>,
+    engine: Arc<RivetEngine>,
 }
 
 #[async_trait::async_trait]
@@ -255,11 +255,11 @@ impl TestExecutor for EngineExecutor {
     }
 
     async fn list_connections(&self) -> ConnectionResult {
-        ConnectionResult::from_engine(&self.engine.list_connections().unwrap())
+        ConnectionResult::from_engine(&self.engine.list_connections().await.unwrap())
     }
 
     async fn list_tables(&self, connection: &str) -> TablesResult {
-        TablesResult::from_engine(&self.engine.list_tables(Some(connection)).unwrap())
+        TablesResult::from_engine(&self.engine.list_tables(Some(connection)).await.unwrap())
     }
 
     async fn query(&self, sql: &str) -> QueryResult {
@@ -267,8 +267,8 @@ impl TestExecutor for EngineExecutor {
     }
 
     async fn get_connection(&self, name: &str) -> Option<ConnectionDetails> {
-        let conn = self.engine.catalog().get_connection(name).ok()??;
-        let tables = self.engine.list_tables(Some(name)).ok()?;
+        let conn = self.engine.catalog().get_connection(name).await.ok()??;
+        let tables = self.engine.list_tables(Some(name)).await.ok()?;
         Some(ConnectionDetails::from_engine(&conn, &tables))
     }
 
@@ -299,12 +299,38 @@ impl TestExecutor for ApiExecutor {
                 host,
                 port,
                 user,
-                password,
                 database,
-            } => (
-                "postgres",
-                json!({ "host": host, "port": port, "user": user, "password": password, "database": database }),
-            ),
+                credential,
+            } => {
+                let cred_json = match credential {
+                    rivetdb::source::Credential::None => json!({"type": "none"}),
+                    rivetdb::source::Credential::SecretRef { name } => {
+                        json!({"type": "secret_ref", "name": name})
+                    }
+                };
+                (
+                    "postgres",
+                    json!({ "host": host, "port": port, "user": user, "database": database, "credential": cred_json }),
+                )
+            }
+            Source::Mysql {
+                host,
+                port,
+                user,
+                database,
+                credential,
+            } => {
+                let cred_json = match credential {
+                    rivetdb::source::Credential::None => json!({"type": "none"}),
+                    rivetdb::source::Credential::SecretRef { name } => {
+                        json!({"type": "secret_ref", "name": name})
+                    }
+                };
+                (
+                    "mysql",
+                    json!({ "host": host, "port": port, "user": user, "database": database, "credential": cred_json }),
+                )
+            }
             _ => panic!("Unsupported source type"),
         };
 
@@ -473,6 +499,13 @@ impl TestExecutor for ApiExecutor {
     }
 }
 
+/// Generate a random base64-encoded 32-byte key for test secret manager.
+fn generate_test_secret_key() -> String {
+    use base64::Engine;
+    let key_bytes: [u8; 32] = rand::random();
+    base64::engine::general_purpose::STANDARD.encode(key_bytes)
+}
+
 /// Test context providing both executors.
 struct TestHarness {
     engine_executor: EngineExecutor,
@@ -482,22 +515,18 @@ struct TestHarness {
 }
 
 impl TestHarness {
-    fn new() -> Self {
+    async fn new() -> Self {
         let temp_dir = TempDir::new().unwrap();
-        let catalog_path = temp_dir.path().join("catalog.db");
-        let cache_dir = temp_dir.path().join("cache");
-        let state_dir = temp_dir.path().join("state");
 
-        std::fs::create_dir_all(&cache_dir).unwrap();
-        std::fs::create_dir_all(&state_dir).unwrap();
+        // Generate a test secret key to enable the secret manager
+        let secret_key = generate_test_secret_key();
 
-        let engine = HotDataEngine::new_with_paths(
-            catalog_path.to_str().unwrap(),
-            cache_dir.to_str().unwrap(),
-            state_dir.to_str().unwrap(),
-            false,
-        )
-        .unwrap();
+        let engine = RivetEngine::builder()
+            .base_dir(temp_dir.path())
+            .secret_key(secret_key)
+            .build()
+            .await
+            .unwrap();
 
         let app = AppServer::new(engine);
 
@@ -514,6 +543,15 @@ impl TestHarness {
 
     fn api(&self) -> &dyn TestExecutor {
         &self.api_executor
+    }
+
+    /// Store a secret for use in connection credentials.
+    async fn store_secret(&self, name: &str, value: &str) {
+        let secret_manager = self.engine_executor.engine.secret_manager();
+        secret_manager
+            .create(name, value.as_bytes())
+            .await
+            .expect("Failed to store test secret");
     }
 }
 
@@ -738,6 +776,9 @@ mod postgres_fixtures {
     use testcontainers::{runners::AsyncRunner, ContainerAsync, ImageExt};
     use testcontainers_modules::postgres::Postgres;
 
+    /// The password used for test Postgres containers.
+    pub const TEST_PASSWORD: &str = "postgres";
+
     pub struct PostgresFixture {
         #[allow(dead_code)]
         pub container: ContainerAsync<Postgres>,
@@ -751,11 +792,14 @@ mod postgres_fixtures {
             .await
             .expect("Failed to start postgres");
         let port = container.get_host_port_ipv4(5432).await.unwrap();
-        let conn_str = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+        let conn_str = format!(
+            "postgres://postgres:{}@localhost:{}/postgres",
+            TEST_PASSWORD, port
+        );
         (container, conn_str)
     }
 
-    pub async fn standard() -> PostgresFixture {
+    pub async fn standard(secret_name: &str) -> PostgresFixture {
         let (container, conn_str) = start_container().await;
         let pool = sqlx::PgPool::connect(&conn_str).await.unwrap();
 
@@ -778,13 +822,15 @@ mod postgres_fixtures {
                 host: "localhost".into(),
                 port,
                 user: "postgres".into(),
-                password: "postgres".into(),
                 database: "postgres".into(),
+                credential: rivetdb::source::Credential::SecretRef {
+                    name: secret_name.to_string(),
+                },
             },
         }
     }
 
-    pub async fn multi_schema() -> PostgresFixture {
+    pub async fn multi_schema(secret_name: &str) -> PostgresFixture {
         let (container, conn_str) = start_container().await;
         let pool = sqlx::PgPool::connect(&conn_str).await.unwrap();
 
@@ -821,8 +867,69 @@ mod postgres_fixtures {
                 host: "localhost".into(),
                 port,
                 user: "postgres".into(),
-                password: "postgres".into(),
                 database: "postgres".into(),
+                credential: rivetdb::source::Credential::SecretRef {
+                    name: secret_name.to_string(),
+                },
+            },
+        }
+    }
+}
+
+mod mysql_fixtures {
+    use super::*;
+    use testcontainers::{runners::AsyncRunner, ContainerAsync, ImageExt};
+    use testcontainers_modules::mysql::Mysql;
+
+    /// The password used for test MySQL containers.
+    pub const TEST_PASSWORD: &str = "root";
+
+    pub struct MysqlFixture {
+        #[allow(dead_code)]
+        pub container: ContainerAsync<Mysql>,
+        pub source: Source,
+    }
+
+    async fn start_container() -> (ContainerAsync<Mysql>, String) {
+        let container = Mysql::default()
+            .with_tag("8.0")
+            .with_env_var("MYSQL_ROOT_PASSWORD", TEST_PASSWORD)
+            .start()
+            .await
+            .expect("Failed to start mysql");
+        let port = container.get_host_port_ipv4(3306).await.unwrap();
+        let conn_str = format!("mysql://root:{}@localhost:{}/mysql", TEST_PASSWORD, port);
+        (container, conn_str)
+    }
+
+    pub async fn standard(secret_name: &str) -> MysqlFixture {
+        let (container, conn_str) = start_container().await;
+        let pool = sqlx::MySqlPool::connect(&conn_str).await.unwrap();
+
+        // Create database and schema (MySQL uses database = schema)
+        sqlx::query("CREATE DATABASE IF NOT EXISTS sales")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE sales.orders (order_id INTEGER, customer_name VARCHAR(100), amount DOUBLE, is_paid BOOLEAN)"
+        ).execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO sales.orders VALUES (1, 'Alice', 100.50, true), (2, 'Bob', 250.75, false), (3, 'Charlie', 75.25, true), (4, 'David', 500.00, true)"
+        ).execute(&pool).await.unwrap();
+        pool.close().await;
+
+        let port = container.get_host_port_ipv4(3306).await.unwrap();
+        MysqlFixture {
+            container,
+            source: Source::Mysql {
+                host: "localhost".into(),
+                port,
+                user: "root".into(),
+                database: "sales".into(),
+                credential: rivetdb::source::Credential::SecretRef {
+                    name: secret_name.to_string(),
+                },
             },
         }
     }
@@ -835,73 +942,73 @@ mod postgres_fixtures {
 mod duckdb_tests {
     use super::*;
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_engine_golden_path() {
         let (_dir, source) = fixtures::duckdb_standard();
-        let harness = TestHarness::new();
+        let harness = TestHarness::new().await;
         run_golden_path_test(harness.engine(), &source, "duckdb_conn").await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_api_golden_path() {
         let (_dir, source) = fixtures::duckdb_standard();
-        let harness = TestHarness::new();
+        let harness = TestHarness::new().await;
         run_golden_path_test(harness.api(), &source, "duckdb_conn").await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_engine_multi_schema() {
         let (_dir, source) = fixtures::duckdb_multi_schema();
-        let harness = TestHarness::new();
+        let harness = TestHarness::new().await;
         run_multi_schema_test(harness.engine(), &source, "duckdb_conn").await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_api_multi_schema() {
         let (_dir, source) = fixtures::duckdb_multi_schema();
-        let harness = TestHarness::new();
+        let harness = TestHarness::new().await;
         run_multi_schema_test(harness.api(), &source, "duckdb_conn").await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_engine_delete_connection() {
         let (_dir, source) = fixtures::duckdb_standard();
-        let harness = TestHarness::new();
+        let harness = TestHarness::new().await;
         run_delete_connection_test(harness.engine(), &source, "duckdb_conn").await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_api_delete_connection() {
         let (_dir, source) = fixtures::duckdb_standard();
-        let harness = TestHarness::new();
+        let harness = TestHarness::new().await;
         run_delete_connection_test(harness.api(), &source, "duckdb_conn").await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_engine_purge_connection_cache() {
         let (_dir, source) = fixtures::duckdb_standard();
-        let harness = TestHarness::new();
+        let harness = TestHarness::new().await;
         run_purge_connection_cache_test(harness.engine(), &source, "duckdb_conn").await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_api_purge_connection_cache() {
         let (_dir, source) = fixtures::duckdb_standard();
-        let harness = TestHarness::new();
+        let harness = TestHarness::new().await;
         run_purge_connection_cache_test(harness.api(), &source, "duckdb_conn").await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_engine_purge_table_cache() {
         let (_dir, source) = fixtures::duckdb_standard();
-        let harness = TestHarness::new();
+        let harness = TestHarness::new().await;
         run_purge_table_cache_test(harness.engine(), &source, "duckdb_conn").await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_api_purge_table_cache() {
         let (_dir, source) = fixtures::duckdb_standard();
-        let harness = TestHarness::new();
+        let harness = TestHarness::new().await;
         run_purge_table_cache_test(harness.api(), &source, "duckdb_conn").await;
     }
 }
@@ -913,32 +1020,77 @@ mod duckdb_tests {
 mod postgres_tests {
     use super::*;
 
+    const PG_SECRET_NAME: &str = "pg-test-password";
+
     #[tokio::test(flavor = "multi_thread")]
     async fn test_engine_golden_path() {
-        let fixture = postgres_fixtures::standard().await;
-        let harness = TestHarness::new();
+        let harness = TestHarness::new().await;
+        // Store the password as a secret before creating the fixture
+        harness
+            .store_secret(PG_SECRET_NAME, postgres_fixtures::TEST_PASSWORD)
+            .await;
+        let fixture = postgres_fixtures::standard(PG_SECRET_NAME).await;
         run_golden_path_test(harness.engine(), &fixture.source, "pg_conn").await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_api_golden_path() {
-        let fixture = postgres_fixtures::standard().await;
-        let harness = TestHarness::new();
+        let harness = TestHarness::new().await;
+        harness
+            .store_secret(PG_SECRET_NAME, postgres_fixtures::TEST_PASSWORD)
+            .await;
+        let fixture = postgres_fixtures::standard(PG_SECRET_NAME).await;
         run_golden_path_test(harness.api(), &fixture.source, "pg_conn").await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_engine_multi_schema() {
-        let fixture = postgres_fixtures::multi_schema().await;
-        let harness = TestHarness::new();
+        let harness = TestHarness::new().await;
+        harness
+            .store_secret(PG_SECRET_NAME, postgres_fixtures::TEST_PASSWORD)
+            .await;
+        let fixture = postgres_fixtures::multi_schema(PG_SECRET_NAME).await;
         run_multi_schema_test(harness.engine(), &fixture.source, "pg_conn").await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_api_multi_schema() {
-        let fixture = postgres_fixtures::multi_schema().await;
-        let harness = TestHarness::new();
+        let harness = TestHarness::new().await;
+        harness
+            .store_secret(PG_SECRET_NAME, postgres_fixtures::TEST_PASSWORD)
+            .await;
+        let fixture = postgres_fixtures::multi_schema(PG_SECRET_NAME).await;
         run_multi_schema_test(harness.api(), &fixture.source, "pg_conn").await;
+    }
+}
+
+// ============================================================================
+// Tests - MySQL
+// ============================================================================
+
+mod mysql_tests {
+    use super::*;
+
+    const MYSQL_SECRET_NAME: &str = "mysql-test-password";
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_engine_golden_path() {
+        let harness = TestHarness::new().await;
+        harness
+            .store_secret(MYSQL_SECRET_NAME, mysql_fixtures::TEST_PASSWORD)
+            .await;
+        let fixture = mysql_fixtures::standard(MYSQL_SECRET_NAME).await;
+        run_golden_path_test(harness.engine(), &fixture.source, "mysql_conn").await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_api_golden_path() {
+        let harness = TestHarness::new().await;
+        harness
+            .store_secret(MYSQL_SECRET_NAME, mysql_fixtures::TEST_PASSWORD)
+            .await;
+        let fixture = mysql_fixtures::standard(MYSQL_SECRET_NAME).await;
+        run_golden_path_test(harness.api(), &fixture.source, "mysql_conn").await;
     }
 }
 
@@ -949,9 +1101,9 @@ mod postgres_tests {
 mod error_tests {
     use super::*;
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_get_nonexistent_connection() {
-        let harness = TestHarness::new();
+        let harness = TestHarness::new().await;
 
         // Engine
         let conn = harness.engine().get_connection("nonexistent").await;
@@ -962,25 +1114,25 @@ mod error_tests {
         assert!(conn.is_none());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_delete_nonexistent_connection() {
-        let harness = TestHarness::new();
+        let harness = TestHarness::new().await;
 
         let deleted = harness.api().delete_connection("nonexistent").await;
         assert!(!deleted, "Delete of nonexistent should return false/404");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_purge_nonexistent_connection_cache() {
-        let harness = TestHarness::new();
+        let harness = TestHarness::new().await;
 
         let purged = harness.api().purge_connection_cache("nonexistent").await;
         assert!(!purged, "Purge of nonexistent should return false/404");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_purge_nonexistent_table_cache() {
-        let harness = TestHarness::new();
+        let harness = TestHarness::new().await;
 
         let purged = harness
             .api()

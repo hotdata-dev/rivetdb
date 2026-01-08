@@ -1,8 +1,8 @@
-use super::schema_provider::HotDataSchemaProvider;
+use super::block_on;
+use super::schema_provider::RivetSchemaProvider;
 use crate::catalog::CatalogManager;
-use crate::datafetch::{DataFetcher, NativeFetcher};
+use crate::datafetch::FetchOrchestrator;
 use crate::source::Source;
-use crate::storage::StorageManager;
 use async_trait::async_trait;
 use datafusion::catalog::{CatalogProvider, SchemaProvider};
 use std::collections::HashMap;
@@ -11,32 +11,30 @@ use std::sync::{Arc, RwLock};
 /// A catalog provider that represents a single connection.
 /// Lazily creates schema providers as they are accessed.
 #[derive(Debug)]
-pub struct HotDataCatalogProvider {
+pub struct RivetCatalogProvider {
     connection_id: i32,
     connection_name: String,
     source: Arc<Source>,
     catalog: Arc<dyn CatalogManager>,
+    orchestrator: Arc<FetchOrchestrator>,
     schemas: Arc<RwLock<HashMap<String, Arc<dyn SchemaProvider>>>>,
-    storage: Arc<dyn StorageManager>,
-    fetcher: Arc<dyn DataFetcher>,
 }
 
-impl HotDataCatalogProvider {
+impl RivetCatalogProvider {
     pub fn new(
         connection_id: i32,
         connection_name: String,
         source: Arc<Source>,
         catalog: Arc<dyn CatalogManager>,
-        storage: Arc<dyn StorageManager>,
+        orchestrator: Arc<FetchOrchestrator>,
     ) -> Self {
         Self {
             connection_id,
             connection_name,
             source,
             catalog,
+            orchestrator,
             schemas: Arc::new(RwLock::new(HashMap::new())),
-            storage,
-            fetcher: Arc::new(NativeFetcher::new()),
         }
     }
 
@@ -59,14 +57,13 @@ impl HotDataCatalogProvider {
         }
 
         // Create new schema provider
-        let schema_provider = Arc::new(HotDataSchemaProvider::new(
+        let schema_provider = Arc::new(RivetSchemaProvider::new(
             self.connection_id,
             self.connection_name.clone(),
             schema_name.to_string(),
             self.source.clone(),
             self.catalog.clone(),
-            self.storage.clone(),
-            self.fetcher.clone(),
+            self.orchestrator.clone(),
         )) as Arc<dyn SchemaProvider>;
 
         schemas.insert(schema_name.to_string(), schema_provider.clone());
@@ -76,14 +73,15 @@ impl HotDataCatalogProvider {
 }
 
 #[async_trait]
-impl CatalogProvider for HotDataCatalogProvider {
+impl CatalogProvider for RivetCatalogProvider {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
 
     fn schema_names(&self) -> Vec<String> {
-        // Return all known schema names from DuckDB catalog for this connection
-        match self.catalog.list_tables(Some(self.connection_id)) {
+        // Return schema names tracked in the catalog store for this connection
+        // Uses block_on since CatalogProvider trait methods are sync
+        match block_on(self.catalog.list_tables(Some(self.connection_id))) {
             Ok(tables) => {
                 let mut schemas: Vec<String> = tables
                     .into_iter()
@@ -100,7 +98,8 @@ impl CatalogProvider for HotDataCatalogProvider {
 
     fn schema(&self, name: &str) -> Option<Arc<dyn SchemaProvider>> {
         // Check if this schema exists in our catalog
-        let schema_exists = match self.catalog.list_tables(Some(self.connection_id)) {
+        // Uses block_on since CatalogProvider trait methods are sync
+        let schema_exists = match block_on(self.catalog.list_tables(Some(self.connection_id))) {
             Ok(tables) => tables.iter().any(|t| t.schema_name == name),
             Err(_) => false,
         };

@@ -1,22 +1,27 @@
 use anyhow::Result;
-use rivetdb::datafusion::HotDataEngine;
+use base64::{engine::general_purpose::STANDARD, Engine};
+use rand::RngCore;
+use rivetdb::RivetEngine;
 use tempfile::tempdir;
+
+/// Generate a test secret key (base64-encoded 32 bytes)
+fn generate_test_secret_key() -> String {
+    let mut key = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut key);
+    STANDARD.encode(key)
+}
 
 /// Test that sync_connection handles non-existent connections correctly
 #[tokio::test]
 #[ignore]
 async fn test_sync_connection_not_found() -> Result<()> {
     let dir = tempdir()?;
-    let catalog_path = dir.path().join("catalog.db");
-    let cache_path = dir.path().join("cache");
-    let state_path = dir.path().join("state");
 
-    let engine = HotDataEngine::new_with_paths(
-        catalog_path.to_str().unwrap(),
-        cache_path.to_str().unwrap(),
-        state_path.to_str().unwrap(),
-        false,
-    )?;
+    let engine = RivetEngine::builder()
+        .base_dir(dir.path())
+        .secret_key(generate_test_secret_key())
+        .build()
+        .await?;
 
     // Try to sync a connection that doesn't exist
     let result = engine.sync_connection("nonexistent").await;
@@ -33,16 +38,12 @@ async fn test_sync_connection_not_found() -> Result<()> {
 #[ignore]
 async fn test_sync_connection_no_tables() -> Result<()> {
     let dir = tempdir()?;
-    let catalog_path = dir.path().join("catalog.db");
-    let cache_path = dir.path().join("cache");
-    let state_path = dir.path().join("state");
 
-    let engine = HotDataEngine::new_with_paths(
-        catalog_path.to_str().unwrap(),
-        cache_path.to_str().unwrap(),
-        state_path.to_str().unwrap(),
-        false,
-    )?;
+    let engine = RivetEngine::builder()
+        .base_dir(dir.path())
+        .secret_key(generate_test_secret_key())
+        .build()
+        .await?;
 
     // Add a connection with no tables
     let config = serde_json::json!({
@@ -58,7 +59,9 @@ async fn test_sync_connection_no_tables() -> Result<()> {
     // Instead, manually add a connection with no tables through the catalog
     let catalog = engine.catalog();
     let config_json = serde_json::to_string(&config)?;
-    catalog.add_connection("empty_conn", "postgres", &config_json)?;
+    catalog
+        .add_connection("empty_conn", "postgres", &config_json)
+        .await?;
 
     // Try to sync - should succeed but do nothing
     let result = engine.sync_connection("empty_conn").await;

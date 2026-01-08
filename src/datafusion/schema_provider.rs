@@ -3,38 +3,34 @@ use datafusion::catalog::{MemorySchemaProvider, SchemaProvider};
 use datafusion::datasource::TableProvider;
 use std::sync::Arc;
 
-use crate::catalog::CatalogManager;
-use crate::datafetch::{deserialize_arrow_schema, DataFetcher};
-use crate::source::Source;
-use crate::storage::StorageManager;
-
+use super::block_on;
 use super::lazy_table_provider::LazyTableProvider;
+use crate::catalog::CatalogManager;
+use crate::datafetch::{deserialize_arrow_schema, FetchOrchestrator};
+use crate::source::Source;
 
 /// A schema provider that syncs tables on-demand from remote sources.
 /// Wraps MemorySchemaProvider for caching already-loaded tables.
 #[derive(Debug)]
-pub struct HotDataSchemaProvider {
+pub struct RivetSchemaProvider {
     connection_id: i32,
     #[allow(dead_code)]
     connection_name: String,
     schema_name: String,
     source: Arc<Source>,
     catalog: Arc<dyn CatalogManager>,
+    orchestrator: Arc<FetchOrchestrator>,
     inner: Arc<MemorySchemaProvider>,
-    storage: Arc<dyn StorageManager>,
-    fetcher: Arc<dyn DataFetcher>,
 }
 
-impl HotDataSchemaProvider {
-    #[allow(clippy::too_many_arguments)]
+impl RivetSchemaProvider {
     pub fn new(
         connection_id: i32,
         connection_name: String,
         schema_name: String,
         source: Arc<Source>,
         catalog: Arc<dyn CatalogManager>,
-        storage: Arc<dyn StorageManager>,
-        fetcher: Arc<dyn DataFetcher>,
+        orchestrator: Arc<FetchOrchestrator>,
     ) -> Self {
         Self {
             connection_id,
@@ -42,22 +38,22 @@ impl HotDataSchemaProvider {
             schema_name,
             source,
             catalog,
+            orchestrator,
             inner: Arc::new(MemorySchemaProvider::new()),
-            storage,
-            fetcher,
         }
     }
 }
 
 #[async_trait]
-impl SchemaProvider for HotDataSchemaProvider {
+impl SchemaProvider for RivetSchemaProvider {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
 
     fn table_names(&self) -> Vec<String> {
-        // Return all known tables from DuckDB catalog
-        match self.catalog.list_tables(Some(self.connection_id)) {
+        // Return all known tables from the catalog store
+        // Uses block_on since SchemaProvider trait methods are sync
+        match block_on(self.catalog.list_tables(Some(self.connection_id))) {
             Ok(tables) => tables
                 .into_iter()
                 .filter(|t| t.schema_name == self.schema_name)
@@ -80,6 +76,7 @@ impl SchemaProvider for HotDataSchemaProvider {
         let table_info = match self
             .catalog
             .get_table(self.connection_id, &self.schema_name, name)
+            .await
         {
             Ok(Some(info)) => info,
             Ok(None) => return Ok(None), // Table doesn't exist
@@ -106,10 +103,9 @@ impl SchemaProvider for HotDataSchemaProvider {
         // Create LazyTableProvider
         let provider = Arc::new(LazyTableProvider::new(
             schema,
-            self.fetcher.clone(),
             self.source.clone(),
             self.catalog.clone(),
-            self.storage.clone(),
+            self.orchestrator.clone(),
             self.connection_id,
             self.schema_name.clone(),
             name.to_string(),
@@ -124,10 +120,13 @@ impl SchemaProvider for HotDataSchemaProvider {
     }
 
     fn table_exist(&self, name: &str) -> bool {
-        // Check DuckDB catalog
+        // Check the catalog metadata store
+        // Uses block_on since SchemaProvider trait methods are sync
         matches!(
-            self.catalog
-                .get_table(self.connection_id, &self.schema_name, name),
+            block_on(
+                self.catalog
+                    .get_table(self.connection_id, &self.schema_name, name)
+            ),
             Ok(Some(_))
         )
     }
