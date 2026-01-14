@@ -162,13 +162,20 @@ The key design principle is **atomic swap** - queries never see partial data:
 │                      last_sync = NOW()                          │
 │    WHERE id = $table_id                                         │
 ├─────────────────────────────────────────────────────────────────┤
-│ 5. Re-register DataFusion catalog provider                      │
-│    (Forces DataFusion to release old file handles)              │
-├─────────────────────────────────────────────────────────────────┤
-│ 6. Delete old cache file                                        │
-│    (Now safe - no active queries using it)                      │
+│ 5. Delete old cache file (with grace period)                    │
+│    - Option A: Delete after short delay (e.g., 30s)             │
+│    - Option B: Background cleanup of old versions               │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+**Why no catalog provider re-registration is needed:**
+
+`LazyTableProvider.scan()` fetches `parquet_path` from the catalog on every query execution (not cached in the provider). Once the catalog is updated, new queries automatically use the new path. In-flight queries that already resolved the old path will complete using the old file.
+
+The only concern is deleting old files while queries are still using them. Solutions:
+- **Grace period**: Wait 30-60 seconds before deleting old files
+- **Reference counting**: Track active scans per file (more complex)
+- **Lazy cleanup**: Mark old files for deletion, clean up periodically
 
 ### Engine Methods
 
@@ -270,7 +277,7 @@ impl FetchOrchestrator {
         schema_name: &str,
         table_name: &str,
     ) -> Result<(String, Option<String>)> {
-        // 1. Get current path (will be deleted after swap)
+        // 1. Get current path (will be deleted after grace period)
         let old_info = self.catalog
             .get_table(connection_id, schema_name, table_name)
             .await?;
@@ -291,7 +298,7 @@ impl FetchOrchestrator {
             .finalize_cache_write(&new_path, connection_id, schema_name, table_name)
             .await?;
 
-        // 5. Atomic catalog update
+        // 5. Atomic catalog update - new queries immediately use new path
         if let Some(info) = self.catalog
             .get_table(connection_id, schema_name, table_name)
             .await?
@@ -299,6 +306,7 @@ impl FetchOrchestrator {
             self.catalog.update_table_sync(info.id, &parquet_url).await?;
         }
 
+        // 6. Return old_path for deferred cleanup (caller schedules deletion)
         Ok((parquet_url, old_path))
     }
 }
@@ -443,8 +451,8 @@ pub async fn refresh_table_handler(
 
 ### Concurrency Safety
 - The catalog database provides atomicity for metadata updates
-- Re-registering DataFusion catalog provider ensures file handle release
-- Old files should only be deleted after catalog update succeeds
+- `LazyTableProvider` reads `parquet_path` fresh on each `scan()`, so no provider re-registration needed
+- Old files should be deleted after a grace period to allow in-flight queries to complete
 
 ### Error Handling
 - If fetch fails, old cache remains valid (no data loss)
