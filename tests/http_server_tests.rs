@@ -254,7 +254,7 @@ async fn test_information_schema_endpoint_with_connection_filter_not_found() -> 
             Request::builder()
                 .method("GET")
                 .uri(format!(
-                    "{}?connection=nonexistent",
+                    "{}?connection_id=nonexistent",
                     PATH_INFORMATION_SCHEMA
                 ))
                 .body(Body::empty())?,

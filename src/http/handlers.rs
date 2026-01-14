@@ -90,24 +90,20 @@ pub async fn information_schema_handler(
     State(engine): State<Arc<RuntimeEngine>>,
     QueryParams(params): QueryParams<HashMap<String, String>>,
 ) -> Result<Json<InformationSchemaResponse>, ApiError> {
-    // Get optional connection filter
-    let connection_filter = params.get("connection").map(|s| s.as_str());
+    // Get optional connection_id filter and resolve to name
+    let connection_filter = if let Some(conn_id) = params.get("connection_id") {
+        let conn = engine
+            .catalog()
+            .get_connection_by_external_id(conn_id)
+            .await?
+            .ok_or_else(|| ApiError::not_found(format!("Connection '{}' not found", conn_id)))?;
+        Some(conn.name)
+    } else {
+        None
+    };
 
-    // Validate connection exists if filter provided
-    // todo: add exists method to engine/catalog;
-    // todo: consider accepting connection_id instead?
-    if let Some(conn_name) = connection_filter {
-        let connections = engine.list_connections().await?;
-        if !connections.iter().any(|c| c.name == conn_name) {
-            return Err(ApiError::not_found(format!(
-                "Connection '{}' not found",
-                conn_name
-            )));
-        }
-    }
-
-    // Get tables from engine
-    let tables = engine.list_tables(connection_filter).await?;
+    // Get tables from engine (uses connection name internally)
+    let tables = engine.list_tables(connection_filter.as_deref()).await?;
 
     // Get all connections to map connection_id to connection name
     let connections = engine.list_connections().await?;

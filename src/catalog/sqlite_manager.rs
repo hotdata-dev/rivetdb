@@ -415,6 +415,19 @@ impl CatalogMigrations for SqliteMigrationBackend {
                 .await?;
         }
 
+        // Verify no NULL external_ids remain (safety check)
+        let null_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM connections WHERE external_id IS NULL")
+                .fetch_one(pool)
+                .await?;
+
+        if null_count > 0 {
+            return Err(anyhow::anyhow!(
+                "Migration failed: {} connections still have NULL external_id",
+                null_count
+            ));
+        }
+
         // Create unique index (IF NOT EXISTS makes this idempotent)
         sqlx::query(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_connections_external_id ON connections(external_id)",

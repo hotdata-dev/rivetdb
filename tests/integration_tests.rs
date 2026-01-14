@@ -424,7 +424,16 @@ impl TestExecutor for ApiExecutor {
     }
 
     async fn list_tables(&self, connection_name: &str) -> TablesResult {
-        let uri = format!("{}?connection={}", PATH_INFORMATION_SCHEMA, connection_name);
+        // First get connection_id from connection name
+        let connections = self.list_connections().await;
+        let connection_id = connections
+            .get_id_by_name(connection_name)
+            .expect("Connection not found for list_tables");
+
+        let uri = format!(
+            "{}?connection_id={}",
+            PATH_INFORMATION_SCHEMA, connection_id
+        );
         let response = self
             .router
             .clone()

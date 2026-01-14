@@ -100,33 +100,60 @@ where
         source_type: &str,
         config_json: &str,
     ) -> Result<i32> {
-        let external_id = crate::catalog::manager::generate_connection_id();
-        let insert_sql = format!(
-            "INSERT INTO connections (external_id, name, source_type, config_json) VALUES ({}, {}, {}, {})",
-            DB::bind_param(1),
-            DB::bind_param(2),
-            DB::bind_param(3),
-            DB::bind_param(4)
-        );
+        const MAX_RETRIES: usize = 3;
 
-        query(&insert_sql)
-            .bind(external_id.as_str())
-            .bind(name)
-            .bind(source_type)
-            .bind(config_json)
-            .execute(&self.pool)
-            .await?;
+        for attempt in 0..MAX_RETRIES {
+            let external_id = crate::catalog::manager::generate_connection_id();
+            let insert_sql = format!(
+                "INSERT INTO connections (external_id, name, source_type, config_json) VALUES ({}, {}, {}, {})",
+                DB::bind_param(1),
+                DB::bind_param(2),
+                DB::bind_param(3),
+                DB::bind_param(4)
+            );
 
-        let select_sql = format!(
-            "SELECT id FROM connections WHERE name = {}",
-            DB::bind_param(1)
-        );
+            let result = query(&insert_sql)
+                .bind(external_id.as_str())
+                .bind(name)
+                .bind(source_type)
+                .bind(config_json)
+                .execute(&self.pool)
+                .await;
 
-        query_scalar::<DB, i32>(&select_sql)
-            .bind(name)
-            .fetch_one(&self.pool)
-            .await
-            .map_err(Into::into)
+            match result {
+                Ok(_) => {
+                    // Success - fetch and return the ID
+                    let select_sql = format!(
+                        "SELECT id FROM connections WHERE name = {}",
+                        DB::bind_param(1)
+                    );
+
+                    return query_scalar::<DB, i32>(&select_sql)
+                        .bind(name)
+                        .fetch_one(&self.pool)
+                        .await
+                        .map_err(Into::into);
+                }
+                Err(e) => {
+                    // Check if it's a unique constraint violation on external_id
+                    let err_str = e.to_string().to_lowercase();
+                    if err_str.contains("unique")
+                        && err_str.contains("external_id")
+                        && attempt < MAX_RETRIES - 1
+                    {
+                        // Retry with new ID
+                        continue;
+                    }
+                    // Other error or max retries exceeded
+                    return Err(e.into());
+                }
+            }
+        }
+
+        Err(anyhow!(
+            "Failed to generate unique connection ID after {} attempts",
+            MAX_RETRIES
+        ))
     }
 
     pub async fn get_connection(&self, name: &str) -> Result<Option<ConnectionInfo>> {
