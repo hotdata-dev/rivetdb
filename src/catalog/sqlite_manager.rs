@@ -63,7 +63,7 @@ impl SqliteCatalogManager {
     async fn initialize_schema(pool: &SqlitePool) -> Result<()> {
         sqlx::query(
             r#"
-            CREATE TABLE IF NOT EXISTS connections (
+            CREATE TABLE connections (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 external_id TEXT UNIQUE NOT NULL,
                 name TEXT UNIQUE NOT NULL,
@@ -78,7 +78,7 @@ impl SqliteCatalogManager {
 
         sqlx::query(
             r#"
-            CREATE TABLE IF NOT EXISTS tables (
+            CREATE TABLE tables (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 connection_id INTEGER NOT NULL,
                 schema_name TEXT NOT NULL,
@@ -97,7 +97,7 @@ impl SqliteCatalogManager {
 
         sqlx::query(
             r#"
-            CREATE TABLE IF NOT EXISTS secrets (
+            CREATE TABLE secrets (
                 name TEXT PRIMARY KEY,
                 provider TEXT NOT NULL,
                 provider_ref TEXT,
@@ -112,7 +112,7 @@ impl SqliteCatalogManager {
 
         sqlx::query(
             r#"
-            CREATE TABLE IF NOT EXISTS encrypted_secret_values (
+            CREATE TABLE encrypted_secret_values (
                 name TEXT PRIMARY KEY,
                 encrypted_value BLOB NOT NULL
             )

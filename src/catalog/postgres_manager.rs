@@ -51,7 +51,7 @@ impl PostgresCatalogManager {
 
     async fn initialize_schema(pool: &PgPool) -> Result<()> {
         sqlx::query(
-            "CREATE TABLE IF NOT EXISTS connections (
+            "CREATE TABLE connections (
                 id SERIAL PRIMARY KEY,
                 external_id TEXT UNIQUE NOT NULL,
                 name TEXT UNIQUE NOT NULL,
@@ -64,7 +64,7 @@ impl PostgresCatalogManager {
         .await?;
 
         sqlx::query(
-            "CREATE TABLE IF NOT EXISTS tables (
+            "CREATE TABLE tables (
                 id SERIAL PRIMARY KEY,
                 connection_id INTEGER NOT NULL,
                 schema_name TEXT NOT NULL,
@@ -81,7 +81,7 @@ impl PostgresCatalogManager {
         .await?;
 
         sqlx::query(
-            "CREATE TABLE IF NOT EXISTS secrets (
+            "CREATE TABLE secrets (
                 name TEXT PRIMARY KEY,
                 provider TEXT NOT NULL,
                 provider_ref TEXT,
@@ -94,7 +94,7 @@ impl PostgresCatalogManager {
         .await?;
 
         sqlx::query(
-            "CREATE TABLE IF NOT EXISTS encrypted_secret_values (
+            "CREATE TABLE encrypted_secret_values (
                 name TEXT PRIMARY KEY,
                 encrypted_value BYTEA NOT NULL
             )",
