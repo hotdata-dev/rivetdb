@@ -53,6 +53,7 @@ impl PostgresCatalogManager {
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS connections (
                 id SERIAL PRIMARY KEY,
+                external_id TEXT UNIQUE NOT NULL,
                 name TEXT UNIQUE NOT NULL,
                 source_type TEXT NOT NULL,
                 config_json TEXT NOT NULL,
@@ -139,6 +140,46 @@ impl CatalogMigrations for PostgresMigrationBackend {
 
     async fn migrate_v1(pool: &Self::Pool) -> Result<()> {
         PostgresCatalogManager::initialize_schema(pool).await
+    }
+
+    async fn migrate_v2(pool: &Self::Pool) -> Result<()> {
+        // Check if external_id column already exists (for fresh databases that got v1 with new schema)
+        let has_external_id: bool = sqlx::query_scalar(
+            "SELECT COUNT(*) > 0 FROM information_schema.columns WHERE table_name = 'connections' AND column_name = 'external_id'",
+        )
+        .fetch_one(pool)
+        .await?;
+
+        if !has_external_id {
+            // Add external_id column
+            sqlx::query("ALTER TABLE connections ADD COLUMN external_id TEXT")
+                .execute(pool)
+                .await?;
+        }
+
+        // Backfill any connections missing external_id
+        let connection_ids: Vec<(i32,)> =
+            sqlx::query_as("SELECT id FROM connections WHERE external_id IS NULL")
+                .fetch_all(pool)
+                .await?;
+
+        for (conn_id,) in connection_ids {
+            let external_id = crate::catalog::manager::generate_connection_id();
+            sqlx::query("UPDATE connections SET external_id = $1 WHERE id = $2")
+                .bind(&external_id)
+                .bind(conn_id)
+                .execute(pool)
+                .await?;
+        }
+
+        // Create unique index (IF NOT EXISTS makes this idempotent)
+        sqlx::query(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_connections_external_id ON connections(external_id)",
+        )
+        .execute(pool)
+        .await?;
+
+        Ok(())
     }
 }
 
