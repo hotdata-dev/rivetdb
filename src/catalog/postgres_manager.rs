@@ -1,6 +1,8 @@
 use crate::catalog::backend::CatalogBackend;
 use crate::catalog::manager::{CatalogManager, ConnectionInfo, OptimisticLock, TableInfo};
-use crate::catalog::migrations::{run_migrations, CatalogMigrations};
+use crate::catalog::migrations::{
+    run_migrations, wrap_migration_sql, CatalogMigrations, Migration, POSTGRES_MIGRATIONS,
+};
 use crate::secrets::{SecretMetadata, SecretStatus};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -48,100 +50,9 @@ impl PostgresCatalogManager {
         let backend = CatalogBackend::new(pool);
         Ok(Self { backend })
     }
-
-    async fn initialize_schema(pool: &PgPool) -> Result<()> {
-        sqlx::query(
-            "CREATE TABLE connections (
-                id SERIAL PRIMARY KEY,
-                external_id TEXT UNIQUE NOT NULL,
-                name TEXT UNIQUE NOT NULL,
-                source_type TEXT NOT NULL,
-                config_json TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )",
-        )
-        .execute(pool)
-        .await?;
-
-        sqlx::query(
-            "CREATE TABLE tables (
-                id SERIAL PRIMARY KEY,
-                connection_id INTEGER NOT NULL,
-                schema_name TEXT NOT NULL,
-                table_name TEXT NOT NULL,
-                parquet_path TEXT,
-                last_sync TIMESTAMP,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                arrow_schema_json TEXT,
-                FOREIGN KEY (connection_id) REFERENCES connections(id),
-                UNIQUE (connection_id, schema_name, table_name)
-            )",
-        )
-        .execute(pool)
-        .await?;
-
-        sqlx::query(
-            "CREATE TABLE secrets (
-                name TEXT PRIMARY KEY,
-                provider TEXT NOT NULL,
-                provider_ref TEXT,
-                status TEXT NOT NULL DEFAULT 'active',
-                created_at TIMESTAMPTZ NOT NULL,
-                updated_at TIMESTAMPTZ NOT NULL
-            )",
-        )
-        .execute(pool)
-        .await?;
-
-        sqlx::query(
-            "CREATE TABLE encrypted_secret_values (
-                name TEXT PRIMARY KEY,
-                encrypted_value BYTEA NOT NULL
-            )",
-        )
-        .execute(pool)
-        .await?;
-
-        Ok(())
-    }
 }
 
 struct PostgresMigrationBackend;
-
-impl CatalogMigrations for PostgresMigrationBackend {
-    type Pool = PgPool;
-
-    async fn ensure_migrations_table(pool: &Self::Pool) -> Result<()> {
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS schema_migrations (
-                version BIGINT PRIMARY KEY,
-                applied_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-            )",
-        )
-        .execute(pool)
-        .await?;
-        Ok(())
-    }
-
-    async fn current_version(pool: &Self::Pool) -> Result<i64> {
-        sqlx::query_scalar("SELECT COALESCE(MAX(version), 0) FROM schema_migrations")
-            .fetch_one(pool)
-            .await
-            .map_err(Into::into)
-    }
-
-    async fn record_version(pool: &Self::Pool, version: i64) -> Result<()> {
-        sqlx::query("INSERT INTO schema_migrations (version) VALUES ($1)")
-            .bind(version)
-            .execute(pool)
-            .await?;
-        Ok(())
-    }
-
-    async fn migrate_v1(pool: &Self::Pool) -> Result<()> {
-        PostgresCatalogManager::initialize_schema(pool).await
-    }
-}
 
 #[async_trait]
 impl CatalogManager for PostgresCatalogManager {
@@ -366,5 +277,40 @@ impl Debug for PostgresCatalogManager {
         f.debug_struct("PostgresCatalogManager")
             .field("pool", self.backend.pool())
             .finish()
+    }
+}
+
+impl CatalogMigrations for PostgresMigrationBackend {
+    type Pool = PgPool;
+
+    fn migrations() -> &'static [Migration] {
+        POSTGRES_MIGRATIONS
+    }
+
+    async fn ensure_migrations_table(pool: &Self::Pool) -> Result<()> {
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS schema_migrations (
+                version BIGINT PRIMARY KEY,
+                hash TEXT NOT NULL,
+                applied_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            )",
+        )
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn get_applied_migrations(pool: &Self::Pool) -> Result<Vec<(i64, String)>> {
+        let rows: Vec<(i64, String)> =
+            sqlx::query_as("SELECT version, hash FROM schema_migrations ORDER BY version")
+                .fetch_all(pool)
+                .await?;
+        Ok(rows)
+    }
+
+    async fn apply_migration(pool: &Self::Pool, version: i64, hash: &str, sql: &str) -> Result<()> {
+        let wrapped_sql = wrap_migration_sql(sql, version, hash);
+        sqlx::raw_sql(&wrapped_sql).execute(pool).await?;
+        Ok(())
     }
 }
