@@ -1,6 +1,6 @@
 use crate::catalog::backend::CatalogBackend;
 use crate::catalog::manager::{CatalogManager, ConnectionInfo, OptimisticLock, TableInfo};
-use crate::catalog::migrations::{run_migrations, CatalogMigrations};
+use crate::catalog::migrations::{run_migrations, CatalogMigrations, Migration, SQLITE_MIGRATIONS};
 use crate::secrets::{SecretMetadata, SecretStatus};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -349,39 +349,42 @@ impl CatalogManager for SqliteCatalogManager {
     }
 }
 
+#[async_trait]
 impl CatalogMigrations for SqliteMigrationBackend {
     type Pool = SqlitePool;
 
+    fn migrations() -> &'static [Migration] {
+        SQLITE_MIGRATIONS
+    }
+
     async fn ensure_migrations_table(pool: &Self::Pool) -> Result<()> {
         sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS schema_migrations (
+            "CREATE TABLE IF NOT EXISTS schema_migrations (
                 version INTEGER PRIMARY KEY,
+                hash TEXT NOT NULL,
                 applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-            "#,
+            )",
         )
         .execute(pool)
         .await?;
         Ok(())
     }
 
-    async fn current_version(pool: &Self::Pool) -> Result<i64> {
-        sqlx::query_scalar("SELECT COALESCE(MAX(version), 0) FROM schema_migrations")
-            .fetch_one(pool)
-            .await
-            .map_err(Into::into)
+    async fn get_applied_migrations(pool: &Self::Pool) -> Result<Vec<(i64, String)>> {
+        let rows: Vec<(i64, String)> =
+            sqlx::query_as("SELECT version, hash FROM schema_migrations ORDER BY version")
+                .fetch_all(pool)
+                .await?;
+        Ok(rows)
     }
 
-    async fn record_version(pool: &Self::Pool, version: i64) -> Result<()> {
-        sqlx::query("INSERT INTO schema_migrations (version) VALUES (?)")
-            .bind(version)
-            .execute(pool)
-            .await?;
+    async fn apply_migration(pool: &Self::Pool, version: i64, hash: &str, sql: &str) -> Result<()> {
+        // Wrap migration SQL and version recording in a transaction
+        let wrapped_sql = format!(
+            "BEGIN;\n{}\nINSERT INTO schema_migrations (version, hash) VALUES ({}, '{}');\nCOMMIT;",
+            sql, version, hash
+        );
+        sqlx::raw_sql(&wrapped_sql).execute(pool).await?;
         Ok(())
-    }
-
-    async fn migrate_v1(pool: &Self::Pool) -> Result<()> {
-        SqliteCatalogManager::initialize_schema(pool).await
     }
 }
