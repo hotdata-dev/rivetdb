@@ -132,3 +132,41 @@ impl StorageManager for FilesystemStorage {
         Ok(self.cache_url(connection_id, schema, table))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_versioned_cache_path_unique() {
+        let storage = FilesystemStorage::new("/tmp/cache");
+        let path1 = storage.prepare_versioned_cache_write(1, "main", "orders");
+        let path2 = storage.prepare_versioned_cache_write(1, "main", "orders");
+        assert_ne!(path1, path2, "Versioned paths should be unique");
+    }
+
+    #[test]
+    fn test_versioned_cache_path_structure() {
+        let storage = FilesystemStorage::new("/tmp/cache");
+        let path = storage.prepare_versioned_cache_write(42, "public", "users");
+        let path_str = path.to_string_lossy();
+
+        assert!(
+            path_str.contains("/42/"),
+            "Path should contain connection_id"
+        );
+        assert!(path_str.contains("/public/"), "Path should contain schema");
+        assert!(
+            path_str.contains("/users/"),
+            "Path should contain table directory"
+        );
+        assert!(
+            path_str.contains("users_v"),
+            "Filename should have versioned prefix"
+        );
+        assert!(
+            path_str.ends_with(".parquet"),
+            "Path should end with .parquet"
+        );
+    }
+}
