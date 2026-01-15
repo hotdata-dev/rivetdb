@@ -165,6 +165,17 @@ impl CatalogMigrations for PostgresMigrationBackend {
 
         Ok(())
     }
+
+    async fn migrate_v3(pool: &Self::Pool) -> Result<()> {
+        // Add UNIQUE constraint on path column to prevent duplicate deletion records
+        sqlx::query(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_deletions_path ON pending_deletions(path)",
+        )
+        .execute(pool)
+        .await?;
+
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -399,13 +410,27 @@ impl CatalogManager for PostgresCatalogManager {
     }
 
     async fn schedule_file_deletion(&self, path: &str, delete_after: DateTime<Utc>) -> Result<()> {
-        self.backend
-            .schedule_file_deletion(path, delete_after)
-            .await
+        // Use native TIMESTAMPTZ binding for Postgres (not RFC3339 string)
+        // ON CONFLICT DO NOTHING silently ignores duplicates when path already exists
+        sqlx::query(
+            "INSERT INTO pending_deletions (path, delete_after) VALUES ($1, $2) ON CONFLICT (path) DO NOTHING",
+        )
+        .bind(path)
+        .bind(delete_after)
+        .execute(self.backend.pool())
+        .await?;
+        Ok(())
     }
 
     async fn get_due_deletions(&self) -> Result<Vec<PendingDeletion>> {
-        self.backend.get_due_deletions().await
+        // Use native TIMESTAMPTZ comparison for Postgres (not RFC3339 string)
+        sqlx::query_as(
+            "SELECT id, path, delete_after FROM pending_deletions WHERE delete_after <= $1",
+        )
+        .bind(Utc::now())
+        .fetch_all(self.backend.pool())
+        .await
+        .map_err(Into::into)
     }
 
     async fn remove_pending_deletion(&self, id: i32) -> Result<()> {

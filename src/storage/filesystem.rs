@@ -113,23 +113,35 @@ impl StorageManager for FilesystemStorage {
         schema: &str,
         table: &str,
     ) -> PathBuf {
+        // Use versioned DIRECTORIES to avoid duplicate reads during grace period.
+        // DataFusion's ListingTable reads all parquet files in a directory.
+        // By using versioned directories with a fixed filename, we ensure only
+        // the active version is read after catalog update.
+        // Path: {cache_base}/{conn_id}/{schema}/{table}/{version}/data.parquet
         let version = nanoid::nanoid!(8);
         self.cache_base
             .join(connection_id.to_string())
             .join(schema)
             .join(table)
-            .join(format!("{}_v{}.parquet", table, version))
+            .join(version)
+            .join("data.parquet")
     }
 
     async fn finalize_cache_write(
         &self,
-        _written_path: &Path,
-        connection_id: i32,
-        schema: &str,
-        table: &str,
+        written_path: &Path,
+        _connection_id: i32,
+        _schema: &str,
+        _table: &str,
     ) -> Result<String> {
-        // No-op for local storage - file is already in place
-        Ok(self.cache_url(connection_id, schema, table))
+        // For local storage, the file is already in place.
+        // Return the parent directory URL (for ListingTable compatibility).
+        // For versioned writes: written_path is {version}/data.parquet,
+        // so parent is the version directory which contains only this file.
+        let parent = written_path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("Written path has no parent"))?;
+        Ok(format!("file://{}", parent.display()))
     }
 }
 
@@ -147,6 +159,7 @@ mod tests {
 
     #[test]
     fn test_versioned_cache_path_structure() {
+        // New structure: {cache_base}/{conn_id}/{schema}/{table}/{version}/data.parquet
         let storage = FilesystemStorage::new("/tmp/cache");
         let path = storage.prepare_versioned_cache_write(42, "public", "users");
         let path_str = path.to_string_lossy();
@@ -160,13 +173,36 @@ mod tests {
             path_str.contains("/users/"),
             "Path should contain table directory"
         );
+        // The version is a directory, not a filename suffix
         assert!(
-            path_str.contains("users_v"),
-            "Filename should have versioned prefix"
+            path_str.ends_with("/data.parquet"),
+            "Path should end with /data.parquet, got: {}",
+            path_str
         );
-        assert!(
-            path_str.ends_with(".parquet"),
-            "Path should end with .parquet"
+    }
+
+    #[test]
+    fn test_versioned_directories_are_separate() {
+        // Verify that each version gets its own isolated directory
+        let storage = FilesystemStorage::new("/tmp/cache");
+        let path1 = storage.prepare_versioned_cache_write(1, "main", "orders");
+        let path2 = storage.prepare_versioned_cache_write(1, "main", "orders");
+
+        // Both should end with data.parquet
+        assert!(path1.ends_with("data.parquet"));
+        assert!(path2.ends_with("data.parquet"));
+
+        // But their parent directories (version dirs) should be different
+        let dir1 = path1.parent().unwrap();
+        let dir2 = path2.parent().unwrap();
+        assert_ne!(dir1, dir2, "Version directories should be different");
+
+        // And both should be under the same table directory
+        let table_dir1 = dir1.parent().unwrap();
+        let table_dir2 = dir2.parent().unwrap();
+        assert_eq!(
+            table_dir1, table_dir2,
+            "Both should be under same table dir"
         );
     }
 }

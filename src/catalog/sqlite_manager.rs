@@ -40,6 +40,24 @@ impl SecretMetadataRow {
     }
 }
 
+/// Row type for pending deletions (SQLite stores timestamps as TEXT)
+#[derive(sqlx::FromRow)]
+struct PendingDeletionRow {
+    id: i32,
+    path: String,
+    delete_after: String,
+}
+
+impl PendingDeletionRow {
+    fn into_pending_deletion(self) -> PendingDeletion {
+        PendingDeletion {
+            id: self.id,
+            path: self.path,
+            delete_after: self.delete_after.parse().unwrap_or_else(|_| Utc::now()),
+        }
+    }
+}
+
 impl Debug for SqliteCatalogManager {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("SqliteCatalogManager")
@@ -365,13 +383,29 @@ impl CatalogManager for SqliteCatalogManager {
     }
 
     async fn schedule_file_deletion(&self, path: &str, delete_after: DateTime<Utc>) -> Result<()> {
-        self.backend
-            .schedule_file_deletion(path, delete_after)
-            .await
+        // Use RFC3339 string for SQLite TEXT column
+        // INSERT OR IGNORE silently ignores duplicates when path already exists
+        sqlx::query("INSERT OR IGNORE INTO pending_deletions (path, delete_after) VALUES (?, ?)")
+            .bind(path)
+            .bind(delete_after.to_rfc3339())
+            .execute(self.backend.pool())
+            .await?;
+        Ok(())
     }
 
     async fn get_due_deletions(&self) -> Result<Vec<PendingDeletion>> {
-        self.backend.get_due_deletions().await
+        // Use RFC3339 string comparison for SQLite TEXT column
+        let rows: Vec<PendingDeletionRow> = sqlx::query_as(
+            "SELECT id, path, delete_after FROM pending_deletions WHERE delete_after <= ?",
+        )
+        .bind(Utc::now().to_rfc3339())
+        .fetch_all(self.backend.pool())
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(PendingDeletionRow::into_pending_deletion)
+            .collect())
     }
 
     async fn remove_pending_deletion(&self, id: i32) -> Result<()> {
@@ -430,6 +464,17 @@ impl CatalogMigrations for SqliteMigrationBackend {
 
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_pending_deletions_due ON pending_deletions(delete_after)",
+        )
+        .execute(pool)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn migrate_v3(pool: &Self::Pool) -> Result<()> {
+        // Add UNIQUE index on path column to prevent duplicate deletion records
+        sqlx::query(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_deletions_path ON pending_deletions(path)",
         )
         .execute(pool)
         .await?;
@@ -536,5 +581,74 @@ mod tests {
         // Should not be due yet
         let due = manager.get_due_deletions().await.unwrap();
         assert!(due.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_pending_deletions_timestamp_roundtrip() {
+        use chrono::TimeZone;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let manager = SqliteCatalogManager::new(db_path.to_str().unwrap())
+            .await
+            .unwrap();
+        manager.run_migrations().await.unwrap();
+
+        // Use a specific timestamp in the past to verify round-trip
+        let specific_time = Utc.with_ymd_and_hms(2024, 6, 15, 12, 30, 45).unwrap();
+        manager
+            .schedule_file_deletion("/tmp/roundtrip.parquet", specific_time)
+            .await
+            .unwrap();
+
+        // Since specific_time is in the past, get_due_deletions should return it
+        let pending = manager.get_due_deletions().await.unwrap();
+
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].path, "/tmp/roundtrip.parquet");
+
+        // Verify the timestamp matches (within second precision due to RFC3339)
+        let stored_time = pending[0].delete_after;
+        assert_eq!(
+            stored_time.timestamp(),
+            specific_time.timestamp(),
+            "Stored timestamp should match original"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pending_deletions_duplicate_path_ignored() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let manager = SqliteCatalogManager::new(db_path.to_str().unwrap())
+            .await
+            .unwrap();
+        manager.run_migrations().await.unwrap();
+
+        // Schedule deletion for a path
+        let past = Utc::now() - chrono::Duration::seconds(10);
+        manager
+            .schedule_file_deletion("/tmp/duplicate.parquet", past)
+            .await
+            .unwrap();
+
+        // Try to schedule the same path again (should be ignored, not error)
+        let later = Utc::now() - chrono::Duration::seconds(5);
+        manager
+            .schedule_file_deletion("/tmp/duplicate.parquet", later)
+            .await
+            .unwrap();
+
+        // Should only have one record for this path
+        let due = manager.get_due_deletions().await.unwrap();
+        let matching: Vec<_> = due
+            .iter()
+            .filter(|d| d.path == "/tmp/duplicate.parquet")
+            .collect();
+        assert_eq!(
+            matching.len(),
+            1,
+            "Should only have one pending deletion for the same path"
+        );
     }
 }

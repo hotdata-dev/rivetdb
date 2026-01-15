@@ -532,6 +532,81 @@ async fn test_refresh_data_creates_new_versioned_file() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn test_data_refresh_no_duplicate_rows() -> Result<()> {
+    // This test validates that during the grace period (before old file deletion),
+    // queries return correct row counts without duplication.
+    //
+    // The fix uses versioned DIRECTORIES instead of versioned FILENAMES:
+    // - Before: cache/1/schema/table/table_v{version}.parquet (multiple files in one dir)
+    // - After:  cache/1/schema/table/{version}/data.parquet (one file per version dir)
+    //
+    // This ensures DataFusion's ListingTable only reads the active version.
+    let harness = RefreshTestHarness::new().await?;
+
+    // Create a DuckDB with known data
+    let db_path = harness.create_duckdb("no_dup_test");
+
+    // Create connection
+    let connection_id = harness.create_connection("test_conn", &db_path).await?;
+
+    // Query to trigger initial sync and verify initial count
+    let result = harness
+        .engine
+        .execute_query("SELECT COUNT(*) as cnt FROM test_conn.sales.orders")
+        .await?;
+    let batch = result.results.first().unwrap();
+    let initial_count = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::Int64Array>()
+        .unwrap()
+        .value(0);
+    assert_eq!(initial_count, 2, "Initial data should have 2 rows");
+
+    // Refresh data (creates new versioned file, schedules old for deletion)
+    let response = harness
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_REFRESH)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "connection_id": connection_id,
+                    "schema_name": "sales",
+                    "table_name": "orders",
+                    "data": true
+                }))?))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // IMMEDIATELY query again - before any grace period cleanup
+    // Row count should be SAME, not doubled
+    let result = harness
+        .engine
+        .execute_query("SELECT COUNT(*) as cnt FROM test_conn.sales.orders")
+        .await?;
+    let batch = result.results.first().unwrap();
+    let post_refresh_count = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::Int64Array>()
+        .unwrap()
+        .value(0);
+
+    assert_eq!(
+        post_refresh_count, 2,
+        "Row count should be 2 after refresh, not {} (doubled would be 4)",
+        post_refresh_count
+    );
+
+    Ok(())
+}
+
 // ============================================================================
 // Validation Tests
 // ============================================================================
@@ -800,18 +875,18 @@ async fn test_data_refresh_schedules_pending_deletion() -> Result<()> {
         .execute_query("SELECT * FROM test_conn.sales.orders")
         .await?;
 
-    // Get the cache directory path
+    // Get the initial cache directory path
     let tables = harness.engine.list_tables(Some("test_conn")).await?;
-    let cache_path = tables
+    let initial_cache_path = tables
         .iter()
         .find(|t| t.table_name == "orders")
         .and_then(|t| t.parquet_path.as_ref())
         .expect("orders should have parquet path")
         .clone();
 
-    // Count parquet files in the cache directory before refresh
-    let cache_dir = cache_path.strip_prefix("file://").unwrap();
-    let files_before: Vec<_> = std::fs::read_dir(cache_dir)?
+    // Verify initial cache directory contains a parquet file
+    let initial_cache_dir = initial_cache_path.strip_prefix("file://").unwrap();
+    let files_before: Vec<_> = std::fs::read_dir(initial_cache_dir)?
         .filter_map(|e| e.ok())
         .filter(|e| e.path().extension().map_or(false, |ext| ext == "parquet"))
         .collect();
@@ -821,7 +896,7 @@ async fn test_data_refresh_schedules_pending_deletion() -> Result<()> {
         "should have 1 parquet file before refresh"
     );
 
-    // Refresh data (creates a new versioned file and schedules old for deletion)
+    // Refresh data (creates a new versioned directory and schedules old for deletion)
     let response = harness
         .router
         .clone()
@@ -841,28 +916,37 @@ async fn test_data_refresh_schedules_pending_deletion() -> Result<()> {
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    // Count parquet files after refresh - should now have 2
-    // (old file still exists, new versioned file created)
-    let files_after: Vec<_> = std::fs::read_dir(cache_dir)?
+    // Get the new cache path after refresh - it should be a versioned directory
+    let tables = harness.engine.list_tables(Some("test_conn")).await?;
+    let new_cache_path = tables
+        .iter()
+        .find(|t| t.table_name == "orders")
+        .and_then(|t| t.parquet_path.as_ref())
+        .expect("orders should have parquet path")
+        .clone();
+
+    // The new cache path should be different (versioned directory)
+    assert_ne!(
+        initial_cache_path, new_cache_path,
+        "cache path should change after refresh to versioned directory"
+    );
+
+    // Verify the new versioned directory contains data.parquet
+    let new_cache_dir = new_cache_path.strip_prefix("file://").unwrap();
+    let files_in_new_version: Vec<_> = std::fs::read_dir(new_cache_dir)?
         .filter_map(|e| e.ok())
         .filter(|e| e.path().extension().map_or(false, |ext| ext == "parquet"))
         .collect();
     assert_eq!(
-        files_after.len(),
-        2,
-        "should have 2 parquet files after refresh (old + new)"
+        files_in_new_version.len(),
+        1,
+        "versioned directory should have exactly 1 parquet file (data.parquet)"
     );
 
-    // Verify at least one file has a version marker in its name
-    let has_versioned = files_after.iter().any(|f| {
-        f.path()
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map_or(false, |n| n.contains("_v"))
-    });
+    // Verify old cache directory still exists (pending deletion)
     assert!(
-        has_versioned,
-        "at least one file should have version marker"
+        std::path::Path::new(initial_cache_dir).exists(),
+        "old cache directory should still exist during grace period"
     );
 
     // The deletion is scheduled 60 seconds in the future by default
@@ -981,6 +1065,657 @@ async fn test_pending_deletions_respect_timing() -> Result<()> {
     // Process pending deletions - should delete nothing since not due yet
     let deleted = harness.engine.process_pending_deletions().await?;
     assert_eq!(deleted, 0, "no files should be deleted before due time");
+
+    Ok(())
+}
+
+// ============================================================================
+// Response Format Tests
+// ============================================================================
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_data_refresh_returns_rows_synced() -> Result<()> {
+    let harness = RefreshTestHarness::new().await?;
+
+    // Create a DuckDB with known data (2 rows in orders)
+    let db_path = harness.create_duckdb("rows_synced_test");
+
+    // Create connection
+    let connection_id = harness.create_connection("test_conn", &db_path).await?;
+
+    // Query to trigger initial sync
+    harness
+        .engine
+        .execute_query("SELECT * FROM test_conn.sales.orders")
+        .await?;
+
+    // Refresh data for a single table
+    let response = harness
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_REFRESH)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "connection_id": connection_id,
+                    "schema_name": "sales",
+                    "table_name": "orders",
+                    "data": true
+                }))?))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    // Verify rows_synced is present and correct (2 rows in our test data)
+    assert!(
+        json["rows_synced"].is_number(),
+        "rows_synced should be a number, got: {:?}",
+        json["rows_synced"]
+    );
+    assert_eq!(
+        json["rows_synced"].as_u64().unwrap(),
+        2,
+        "rows_synced should be 2 (matches test data)"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_connection_refresh_returns_total_rows() -> Result<()> {
+    let harness = RefreshTestHarness::new().await?;
+
+    // Create a DuckDB with multiple tables (1 row each in multi_table setup)
+    let db_path = harness.create_duckdb_multi_table("total_rows_test");
+
+    // Create connection
+    let connection_id = harness.create_connection("test_conn", &db_path).await?;
+
+    // Query both tables to trigger sync
+    harness
+        .engine
+        .execute_query("SELECT * FROM test_conn.sales.orders")
+        .await?;
+    harness
+        .engine
+        .execute_query("SELECT * FROM test_conn.sales.products")
+        .await?;
+
+    // Refresh all data in connection
+    let response = harness
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_REFRESH)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "connection_id": connection_id,
+                    "data": true
+                }))?))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    // Verify total_rows is present and correct (1 row each in 2 tables = 2 total)
+    assert!(
+        json["total_rows"].is_number(),
+        "total_rows should be a number, got: {:?}",
+        json["total_rows"]
+    );
+    assert_eq!(
+        json["total_rows"].as_u64().unwrap(),
+        2,
+        "total_rows should be 2 (1 row per table in multi_table setup)"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_table_refresh_response_contains_external_connection_id() -> Result<()> {
+    let harness = RefreshTestHarness::new().await?;
+
+    // Create a DuckDB
+    let db_path = harness.create_duckdb("external_id_test");
+
+    // Create connection and get the external ID
+    let external_connection_id = harness.create_connection("test_conn", &db_path).await?;
+
+    // Verify the external ID has the expected format (starts with "conn")
+    assert!(
+        external_connection_id.starts_with("conn"),
+        "external connection_id should start with 'conn', got: {}",
+        external_connection_id
+    );
+
+    // Query to trigger initial sync
+    harness
+        .engine
+        .execute_query("SELECT * FROM test_conn.sales.orders")
+        .await?;
+
+    // Refresh data for a single table
+    let response = harness
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_REFRESH)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "connection_id": external_connection_id,
+                    "schema_name": "sales",
+                    "table_name": "orders",
+                    "data": true
+                }))?))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    // Verify response contains the external connection_id string, not internal int
+    let response_conn_id = &json["connection_id"];
+    assert!(
+        response_conn_id.is_string(),
+        "connection_id in response should be a string, got: {:?}",
+        response_conn_id
+    );
+    assert_eq!(
+        response_conn_id.as_str().unwrap(),
+        external_connection_id,
+        "response connection_id should match the external ID used in request"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_connection_refresh_response_contains_external_connection_id() -> Result<()> {
+    let harness = RefreshTestHarness::new().await?;
+
+    // Create a DuckDB with multiple tables
+    let db_path = harness.create_duckdb_multi_table("conn_external_id_test");
+
+    // Create connection and get the external ID
+    let external_connection_id = harness.create_connection("test_conn", &db_path).await?;
+
+    // Verify the external ID has the expected format (starts with "conn")
+    assert!(
+        external_connection_id.starts_with("conn"),
+        "external connection_id should start with 'conn', got: {}",
+        external_connection_id
+    );
+
+    // Query both tables to trigger sync
+    harness
+        .engine
+        .execute_query("SELECT * FROM test_conn.sales.orders")
+        .await?;
+    harness
+        .engine
+        .execute_query("SELECT * FROM test_conn.sales.products")
+        .await?;
+
+    // Refresh all data in connection
+    let response = harness
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_REFRESH)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "connection_id": external_connection_id,
+                    "data": true
+                }))?))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    // Verify response contains the external connection_id string, not internal int
+    let response_conn_id = &json["connection_id"];
+    assert!(
+        response_conn_id.is_string(),
+        "connection_id in response should be a string, got: {:?}",
+        response_conn_id
+    );
+    assert_eq!(
+        response_conn_id.as_str().unwrap(),
+        external_connection_id,
+        "response connection_id should match the external ID used in request"
+    );
+
+    Ok(())
+}
+
+// ============================================================================
+// Concurrent Refresh Tests
+// ============================================================================
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_concurrent_refresh_same_table() -> Result<()> {
+    let harness = RefreshTestHarness::new().await?;
+
+    // Create a DuckDB
+    let db_path = harness.create_duckdb("concurrent_same_table");
+
+    // Create connection
+    let connection_id = harness.create_connection("test_conn", &db_path).await?;
+
+    // Query to trigger initial sync
+    harness
+        .engine
+        .execute_query("SELECT * FROM test_conn.sales.orders")
+        .await?;
+
+    // Run two refreshes concurrently on the same table
+    let engine1 = harness.engine.clone();
+    let engine2 = harness.engine.clone();
+    let conn_id = connection_id.clone();
+
+    // Get internal connection ID
+    let internal_conn = harness
+        .engine
+        .catalog()
+        .get_connection_by_external_id(&connection_id)
+        .await?
+        .expect("connection should exist");
+
+    let (result1, result2) = tokio::join!(
+        engine1.refresh_table_data(internal_conn.id, &conn_id, "sales", "orders"),
+        engine2.refresh_table_data(internal_conn.id, &conn_id, "sales", "orders")
+    );
+
+    // Both should complete (one might succeed, both might succeed)
+    // The key assertion is that neither should panic and data should be consistent
+    let success_count = [&result1, &result2].iter().filter(|r| r.is_ok()).count();
+
+    assert!(
+        success_count >= 1,
+        "At least one concurrent refresh should succeed. Result1: {:?}, Result2: {:?}",
+        result1,
+        result2
+    );
+
+    // Verify the final state is consistent - query should work
+    let query_result = harness
+        .engine
+        .execute_query("SELECT COUNT(*) as cnt FROM test_conn.sales.orders")
+        .await?;
+    let batch = query_result.results.first().unwrap();
+    let count = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::Int64Array>()
+        .unwrap()
+        .value(0);
+
+    assert_eq!(count, 2, "Row count should be 2 after concurrent refreshes");
+
+    // Verify pending deletions don't have duplicates for the same path
+    // (This validates the fix from #8 - INSERT OR IGNORE on pending_deletions)
+    let due = harness.engine.catalog().get_due_deletions().await?;
+    let paths: std::collections::HashSet<_> = due.iter().map(|d| &d.path).collect();
+    assert_eq!(
+        due.len(),
+        paths.len(),
+        "Pending deletions should not contain duplicate paths"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_concurrent_refresh_different_tables() -> Result<()> {
+    let harness = RefreshTestHarness::new().await?;
+
+    // Create a DuckDB with multiple tables
+    let db_path = harness.create_duckdb_multi_table("concurrent_diff_tables");
+
+    // Create connection
+    let connection_id = harness.create_connection("test_conn", &db_path).await?;
+
+    // Query both tables to trigger initial sync
+    harness
+        .engine
+        .execute_query("SELECT * FROM test_conn.sales.orders")
+        .await?;
+    harness
+        .engine
+        .execute_query("SELECT * FROM test_conn.sales.products")
+        .await?;
+
+    // Get internal connection ID
+    let internal_conn = harness
+        .engine
+        .catalog()
+        .get_connection_by_external_id(&connection_id)
+        .await?
+        .expect("connection should exist");
+
+    let engine1 = harness.engine.clone();
+    let engine2 = harness.engine.clone();
+    let conn_id1 = connection_id.clone();
+    let conn_id2 = connection_id.clone();
+    let internal_id = internal_conn.id;
+
+    // Run refreshes for different tables concurrently
+    let (result1, result2) = tokio::join!(
+        engine1.refresh_table_data(internal_id, &conn_id1, "sales", "orders"),
+        engine2.refresh_table_data(internal_id, &conn_id2, "sales", "products")
+    );
+
+    // Both should succeed since they're different tables
+    assert!(
+        result1.is_ok(),
+        "Refresh of orders table should succeed: {:?}",
+        result1
+    );
+    assert!(
+        result2.is_ok(),
+        "Refresh of products table should succeed: {:?}",
+        result2
+    );
+
+    // Verify both tables are queryable
+    let orders_result = harness
+        .engine
+        .execute_query("SELECT COUNT(*) FROM test_conn.sales.orders")
+        .await?;
+    let products_result = harness
+        .engine
+        .execute_query("SELECT COUNT(*) FROM test_conn.sales.products")
+        .await?;
+
+    assert!(
+        !orders_result.results.is_empty(),
+        "Orders query should return results"
+    );
+    assert!(
+        !products_result.results.is_empty(),
+        "Products query should return results"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_concurrent_schema_and_data_refresh() -> Result<()> {
+    let harness = RefreshTestHarness::new().await?;
+
+    // Create a DuckDB with multiple tables
+    let db_path = harness.create_duckdb_multi_table("concurrent_schema_data");
+
+    // Create connection
+    let connection_id = harness.create_connection("test_conn", &db_path).await?;
+
+    // Query to trigger initial sync
+    harness
+        .engine
+        .execute_query("SELECT * FROM test_conn.sales.orders")
+        .await?;
+
+    // Get internal connection ID
+    let internal_conn = harness
+        .engine
+        .catalog()
+        .get_connection_by_external_id(&connection_id)
+        .await?
+        .expect("connection should exist");
+
+    let engine1 = harness.engine.clone();
+    let engine2 = harness.engine.clone();
+    let conn_id = connection_id.clone();
+    let internal_id = internal_conn.id;
+
+    // Run schema refresh and data refresh concurrently
+    let (schema_result, data_result) = tokio::join!(
+        engine1.refresh_schema(internal_id),
+        engine2.refresh_table_data(internal_id, &conn_id, "sales", "orders")
+    );
+
+    // Both should succeed
+    assert!(
+        schema_result.is_ok(),
+        "Schema refresh should succeed: {:?}",
+        schema_result
+    );
+    assert!(
+        data_result.is_ok(),
+        "Data refresh should succeed: {:?}",
+        data_result
+    );
+
+    // Verify final state is consistent
+    let tables = harness.engine.list_tables(Some("test_conn")).await?;
+    assert!(
+        tables.len() >= 1,
+        "Should have at least one table after concurrent refresh"
+    );
+
+    // Query should still work
+    let query_result = harness
+        .engine
+        .execute_query("SELECT * FROM test_conn.sales.orders")
+        .await?;
+    assert!(
+        !query_result.results.is_empty(),
+        "Query should return results after concurrent refresh"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_concurrent_connection_wide_refresh() -> Result<()> {
+    let harness = RefreshTestHarness::new().await?;
+
+    // Create a DuckDB with multiple tables
+    let db_path = harness.create_duckdb_multi_table("concurrent_conn_wide");
+
+    // Create connection
+    let connection_id = harness.create_connection("test_conn", &db_path).await?;
+
+    // Query both tables to trigger initial sync
+    harness
+        .engine
+        .execute_query("SELECT * FROM test_conn.sales.orders")
+        .await?;
+    harness
+        .engine
+        .execute_query("SELECT * FROM test_conn.sales.products")
+        .await?;
+
+    // Get internal connection ID
+    let internal_conn = harness
+        .engine
+        .catalog()
+        .get_connection_by_external_id(&connection_id)
+        .await?
+        .expect("connection should exist");
+
+    let engine1 = harness.engine.clone();
+    let engine2 = harness.engine.clone();
+    let conn_id1 = connection_id.clone();
+    let conn_id2 = connection_id.clone();
+    let internal_id = internal_conn.id;
+
+    // Run two connection-wide data refreshes concurrently
+    let (result1, result2) = tokio::join!(
+        engine1.refresh_connection_data(internal_id, &conn_id1),
+        engine2.refresh_connection_data(internal_id, &conn_id2)
+    );
+
+    // Both should complete without panicking
+    let success_count = [&result1, &result2].iter().filter(|r| r.is_ok()).count();
+
+    assert!(
+        success_count >= 1,
+        "At least one connection-wide refresh should succeed. Result1: {:?}, Result2: {:?}",
+        result1,
+        result2
+    );
+
+    // Verify final state is queryable
+    let orders_result = harness
+        .engine
+        .execute_query("SELECT COUNT(*) FROM test_conn.sales.orders")
+        .await?;
+    assert!(!orders_result.results.is_empty());
+
+    let products_result = harness
+        .engine
+        .execute_query("SELECT COUNT(*) FROM test_conn.sales.products")
+        .await?;
+    assert!(!products_result.results.is_empty());
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_concurrent_refresh_multiple_connections() -> Result<()> {
+    let harness = RefreshTestHarness::new().await?;
+
+    // Create two separate DuckDBs
+    let db_path1 = harness.create_duckdb("concurrent_conn1");
+    let db_path2 = harness.create_duckdb("concurrent_conn2");
+
+    // Create two connections
+    let conn_id1 = harness.create_connection("conn1", &db_path1).await?;
+    let conn_id2 = harness.create_connection("conn2", &db_path2).await?;
+
+    // Query both to trigger initial sync
+    harness
+        .engine
+        .execute_query("SELECT * FROM conn1.sales.orders")
+        .await?;
+    harness
+        .engine
+        .execute_query("SELECT * FROM conn2.sales.orders")
+        .await?;
+
+    // Get internal IDs
+    let internal_conn1 = harness
+        .engine
+        .catalog()
+        .get_connection_by_external_id(&conn_id1)
+        .await?
+        .expect("conn1 should exist");
+    let internal_conn2 = harness
+        .engine
+        .catalog()
+        .get_connection_by_external_id(&conn_id2)
+        .await?
+        .expect("conn2 should exist");
+
+    let engine1 = harness.engine.clone();
+    let engine2 = harness.engine.clone();
+    let ext_id1 = conn_id1.clone();
+    let ext_id2 = conn_id2.clone();
+
+    // Refresh different connections concurrently
+    let (result1, result2) = tokio::join!(
+        engine1.refresh_table_data(internal_conn1.id, &ext_id1, "sales", "orders"),
+        engine2.refresh_table_data(internal_conn2.id, &ext_id2, "sales", "orders")
+    );
+
+    // Both should succeed - no interference between connections
+    assert!(
+        result1.is_ok(),
+        "Refresh of conn1.orders should succeed: {:?}",
+        result1
+    );
+    assert!(
+        result2.is_ok(),
+        "Refresh of conn2.orders should succeed: {:?}",
+        result2
+    );
+
+    // Verify both are queryable
+    let q1 = harness
+        .engine
+        .execute_query("SELECT COUNT(*) FROM conn1.sales.orders")
+        .await?;
+    let q2 = harness
+        .engine
+        .execute_query("SELECT COUNT(*) FROM conn2.sales.orders")
+        .await?;
+
+    assert!(!q1.results.is_empty());
+    assert!(!q2.results.is_empty());
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_rapid_sequential_refresh_same_table() -> Result<()> {
+    let harness = RefreshTestHarness::new().await?;
+
+    // Create a DuckDB
+    let db_path = harness.create_duckdb("rapid_refresh");
+
+    // Create connection
+    let connection_id = harness.create_connection("test_conn", &db_path).await?;
+
+    // Query to trigger initial sync
+    harness
+        .engine
+        .execute_query("SELECT * FROM test_conn.sales.orders")
+        .await?;
+
+    // Get internal connection ID
+    let internal_conn = harness
+        .engine
+        .catalog()
+        .get_connection_by_external_id(&connection_id)
+        .await?
+        .expect("connection should exist");
+
+    // Perform rapid sequential refreshes (simulates rapid button clicks)
+    for i in 0..5 {
+        let result = harness
+            .engine
+            .refresh_table_data(internal_conn.id, &connection_id, "sales", "orders")
+            .await;
+
+        assert!(result.is_ok(), "Refresh {} should succeed: {:?}", i, result);
+    }
+
+    // Verify final state is consistent
+    let query_result = harness
+        .engine
+        .execute_query("SELECT COUNT(*) as cnt FROM test_conn.sales.orders")
+        .await?;
+    let batch = query_result.results.first().unwrap();
+    let count = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::Int64Array>()
+        .unwrap()
+        .value(0);
+
+    assert_eq!(count, 2, "Row count should be 2 after rapid refreshes");
 
     Ok(())
 }

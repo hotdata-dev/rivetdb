@@ -38,6 +38,9 @@ pub trait CatalogMigrations {
 
     /// Applies the v2 schema migration (adds pending_deletions table).
     async fn migrate_v2(pool: &Self::Pool) -> Result<()>;
+
+    /// Applies the v3 schema migration (adds UNIQUE constraint on pending_deletions.path).
+    async fn migrate_v3(pool: &Self::Pool) -> Result<()>;
 }
 
 /// Runs all pending migrations for a catalog backend.
@@ -68,6 +71,11 @@ pub async fn run_migrations<M: CatalogMigrations>(pool: &M::Pool) -> Result<()> 
     if current_version < 2 {
         M::migrate_v2(pool).await?;
         M::record_version(pool, 2).await?;
+    }
+
+    if current_version < 3 {
+        M::migrate_v3(pool).await?;
+        M::record_version(pool, 3).await?;
     }
 
     Ok(())

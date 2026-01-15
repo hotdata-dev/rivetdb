@@ -530,7 +530,7 @@ pub async fn refresh_handler(
     }
 
     // Resolve connection_id from external ID to internal ID if provided
-    let conn_id = if let Some(ref external_id) = request.connection_id {
+    let conn_info = if let Some(ref external_id) = request.connection_id {
         let conn = engine
             .catalog()
             .get_connection_by_external_id(external_id)
@@ -538,13 +538,13 @@ pub async fn refresh_handler(
             .ok_or_else(|| {
                 ApiError::not_found(format!("Connection '{}' not found", external_id))
             })?;
-        Some(conn.id)
+        Some((conn.id, external_id.clone()))
     } else {
         None
     };
 
     let response = match (
-        conn_id,
+        conn_info,
         request.schema_name,
         request.table_name,
         request.data,
@@ -556,7 +556,7 @@ pub async fn refresh_handler(
         }
 
         // Schema refresh: single connection
-        (Some(conn_id), None, None, false) => {
+        (Some((conn_id, _)), None, None, false) => {
             let (added, removed, modified) = engine.refresh_schema(conn_id).await?;
             let tables = engine.catalog().list_tables(Some(conn_id)).await?;
             RefreshResponse::Schema(SchemaRefreshResult {
@@ -569,14 +569,18 @@ pub async fn refresh_handler(
         }
 
         // Data refresh: single table
-        (Some(conn_id), Some(schema), Some(table), true) => {
-            let result = engine.refresh_table_data(conn_id, &schema, &table).await?;
+        (Some((conn_id, external_id)), Some(schema), Some(table), true) => {
+            let result = engine
+                .refresh_table_data(conn_id, &external_id, &schema, &table)
+                .await?;
             RefreshResponse::Table(result)
         }
 
         // Data refresh: all tables in connection
-        (Some(conn_id), None, None, true) => {
-            let result = engine.refresh_connection_data(conn_id).await?;
+        (Some((conn_id, external_id)), None, None, true) => {
+            let result = engine
+                .refresh_connection_data(conn_id, &external_id)
+                .await?;
             RefreshResponse::Connection(result)
         }
 

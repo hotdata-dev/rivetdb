@@ -19,7 +19,8 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::Semaphore;
+use tokio::sync::{Mutex, Semaphore};
+use tokio_util::sync::CancellationToken;
 use tracing::error;
 
 /// Default insecure encryption key for development use only.
@@ -39,6 +40,9 @@ pub struct RuntimeEngine {
     storage: Arc<dyn StorageManager>,
     orchestrator: Arc<FetchOrchestrator>,
     secret_manager: Arc<SecretManager>,
+    shutdown_token: CancellationToken,
+    deletion_worker_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    deletion_grace_period: Duration,
 }
 
 impl RuntimeEngine {
@@ -442,12 +446,23 @@ impl RuntimeEngine {
     /// Shutdown the engine and close all connections.
     /// This should be called before the application exits to ensure proper cleanup.
     pub async fn shutdown(&self) -> Result<()> {
+        // Signal the deletion worker to stop
+        self.shutdown_token.cancel();
+
+        // Wait for the deletion worker to finish
+        if let Some(handle) = self.deletion_worker_handle.lock().await.take() {
+            // We use a timeout to avoid blocking forever if the worker is stuck
+            let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        }
+
         self.catalog.close().await
     }
 
     /// Schedule file deletion after grace period (persisted to database).
     async fn schedule_file_deletion(&self, path: &str) -> Result<()> {
-        let delete_after = Utc::now() + chrono::Duration::seconds(60);
+        let grace_period = chrono::Duration::from_std(self.deletion_grace_period)
+            .map_err(|e| anyhow::anyhow!("Invalid grace period duration: {}", e))?;
+        let delete_after = Utc::now() + grace_period;
         self.catalog
             .schedule_file_deletion(path, delete_after)
             .await
@@ -545,6 +560,7 @@ impl RuntimeEngine {
     pub async fn refresh_table_data(
         &self,
         connection_id: i32,
+        external_id: &str,
         schema_name: &str,
         table_name: &str,
     ) -> Result<TableRefreshResult> {
@@ -557,7 +573,7 @@ impl RuntimeEngine {
             .ok_or_else(|| anyhow::anyhow!("Connection not found"))?;
         let source: Source = serde_json::from_str(&conn.config_json)?;
 
-        let (_, old_path) = self
+        let (_, old_path, rows_synced) = self
             .orchestrator
             .refresh_table(&source, connection_id, schema_name, table_name)
             .await?;
@@ -567,10 +583,10 @@ impl RuntimeEngine {
         }
 
         Ok(TableRefreshResult {
-            connection_id,
+            connection_id: external_id.to_string(),
             schema_name: schema_name.to_string(),
             table_name: table_name.to_string(),
-            rows_synced: 0, // Row count not tracked by parquet writer
+            rows_synced,
             duration_ms: start.elapsed().as_millis() as u64,
         })
     }
@@ -579,6 +595,7 @@ impl RuntimeEngine {
     pub async fn refresh_connection_data(
         &self,
         connection_id: i32,
+        external_id: &str,
     ) -> Result<ConnectionRefreshResult> {
         let start = std::time::Instant::now();
         let tables = self.catalog.list_tables(Some(connection_id)).await?;
@@ -591,7 +608,7 @@ impl RuntimeEngine {
         let source: Source = serde_json::from_str(&conn.config_json)?;
 
         let mut result = ConnectionRefreshResult {
-            connection_id,
+            connection_id: external_id.to_string(),
             tables_refreshed: 0,
             tables_failed: 0,
             total_rows: 0,
@@ -622,8 +639,9 @@ impl RuntimeEngine {
         for handle in handles {
             let (schema_name, table_name, refresh_result) = handle.await?;
             match refresh_result {
-                Ok((_, old_path)) => {
+                Ok((_, old_path, rows_synced)) => {
                     result.tables_refreshed += 1;
+                    result.total_rows += rows_synced;
                     if let Some(path) = old_path {
                         self.schedule_file_deletion(&path).await?;
                     }
@@ -664,39 +682,50 @@ impl RuntimeEngine {
     }
 
     /// Start background task that processes pending deletions every 30 seconds.
-    fn start_deletion_worker(&self) {
-        let catalog = self.catalog.clone();
-        let storage = self.storage.clone();
-
+    /// Returns the JoinHandle for the spawned task.
+    fn start_deletion_worker(
+        catalog: Arc<dyn CatalogManager>,
+        storage: Arc<dyn StorageManager>,
+        shutdown_token: CancellationToken,
+    ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
             loop {
-                interval.tick().await;
-
-                let pending = match catalog.get_due_deletions().await {
-                    Ok(p) => p,
-                    Err(e) => {
-                        warn!("Failed to get pending deletions: {}", e);
-                        continue;
+                tokio::select! {
+                    _ = shutdown_token.cancelled() => {
+                        info!("Deletion worker received shutdown signal");
+                        break;
                     }
-                };
+                    _ = interval.tick() => {
+                        let pending = match catalog.get_due_deletions().await {
+                            Ok(p) => p,
+                            Err(e) => {
+                                warn!("Failed to get pending deletions: {}", e);
+                                continue;
+                            }
+                        };
 
-                for deletion in pending {
-                    if let Err(e) = storage.delete(&deletion.path).await {
-                        warn!("Failed to delete {}: {}", deletion.path, e);
-                        continue;
-                    }
-                    if let Err(e) = catalog.remove_pending_deletion(deletion.id).await {
-                        warn!("Failed to remove deletion record {}: {}", deletion.id, e);
+                        for deletion in pending {
+                            if let Err(e) = storage.delete(&deletion.path).await {
+                                warn!("Failed to delete {}: {}", deletion.path, e);
+                                continue;
+                            }
+                            if let Err(e) = catalog.remove_pending_deletion(deletion.id).await {
+                                warn!("Failed to remove deletion record {}: {}", deletion.id, e);
+                            }
+                        }
                     }
                 }
             }
-        });
+        })
     }
 }
 
 impl Drop for RuntimeEngine {
     fn drop(&mut self) {
+        // Signal the deletion worker to stop
+        self.shutdown_token.cancel();
+
         // Ensure catalog connection is closed when engine is dropped
         let _ = block_on(self.catalog.close());
     }
@@ -735,6 +764,7 @@ pub struct RuntimeEngineBuilder {
     catalog: Option<Arc<dyn CatalogManager>>,
     storage: Option<Arc<dyn StorageManager>>,
     secret_key: Option<String>,
+    deletion_grace_period: Duration,
 }
 
 impl Default for RuntimeEngineBuilder {
@@ -742,6 +772,9 @@ impl Default for RuntimeEngineBuilder {
         Self::new()
     }
 }
+
+/// Default grace period for file deletion (60 seconds).
+const DEFAULT_DELETION_GRACE_PERIOD: Duration = Duration::from_secs(60);
 
 impl RuntimeEngineBuilder {
     pub fn new() -> Self {
@@ -751,6 +784,7 @@ impl RuntimeEngineBuilder {
             catalog: None,
             storage: None,
             secret_key: std::env::var("RUNTIMEDB_SECRET_KEY").ok(),
+            deletion_grace_period: DEFAULT_DELETION_GRACE_PERIOD,
         }
     }
 
@@ -787,6 +821,15 @@ impl RuntimeEngineBuilder {
     /// If neither is set, uses a default insecure key (with loud warnings).
     pub fn secret_key(mut self, key: impl Into<String>) -> Self {
         self.secret_key = Some(key.into());
+        self
+    }
+
+    /// Set the grace period for file deletion.
+    /// When cached files are replaced during refresh operations, the old files
+    /// are scheduled for deletion after this grace period to allow in-flight
+    /// queries to complete. Defaults to 60 seconds.
+    pub fn deletion_grace_period(mut self, duration: Duration) -> Self {
+        self.deletion_grace_period = duration;
         self
     }
 
@@ -892,12 +935,25 @@ impl RuntimeEngineBuilder {
             secret_manager.clone(),
         ));
 
+        // Create shutdown token for graceful shutdown
+        let shutdown_token = CancellationToken::new();
+
+        // Start background deletion worker
+        let deletion_worker_handle = RuntimeEngine::start_deletion_worker(
+            catalog.clone(),
+            storage.clone(),
+            shutdown_token.clone(),
+        );
+
         let mut engine = RuntimeEngine {
             catalog,
             df_ctx,
             storage,
             orchestrator,
             secret_manager,
+            shutdown_token,
+            deletion_worker_handle: Mutex::new(Some(deletion_worker_handle)),
+            deletion_grace_period: self.deletion_grace_period,
         };
 
         // Register all existing connections as DataFusion catalogs
@@ -917,9 +973,6 @@ impl RuntimeEngineBuilder {
         if let Err(e) = engine.process_pending_deletions().await {
             warn!("Failed to process pending deletions on startup: {}", e);
         }
-
-        // Start background deletion worker
-        engine.start_deletion_worker();
 
         Ok(engine)
     }
@@ -1028,6 +1081,109 @@ mod tests {
         let engine = result.unwrap();
         let connections = engine.list_connections().await;
         assert!(connections.is_ok(), "Should be able to list connections");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_deletion_worker_stops_on_shutdown() {
+        let temp_dir = TempDir::new().unwrap();
+        let base_dir = temp_dir.path().to_path_buf();
+
+        // Create engine
+        let engine = RuntimeEngine::builder()
+            .base_dir(base_dir)
+            .secret_key(test_secret_key())
+            .build()
+            .await
+            .unwrap();
+
+        // Verify the worker handle exists before shutdown
+        assert!(
+            engine.deletion_worker_handle.lock().await.is_some(),
+            "Worker handle should exist after engine creation"
+        );
+
+        // Trigger shutdown
+        engine.shutdown().await.unwrap();
+
+        // After shutdown, we should be able to verify the worker task completed
+        // The handle should have been awaited during shutdown
+        // Note: We can't check the handle directly after shutdown since it's consumed,
+        // but we can verify the shutdown token was cancelled
+
+        // Schedule a deletion in the past
+        let past = Utc::now() - chrono::Duration::seconds(10);
+        engine
+            .catalog
+            .schedule_file_deletion("/tmp/test.parquet", past)
+            .await
+            .unwrap();
+
+        // Wait a bit - if worker was still running, it would process this
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // The deletion should still be pending (worker stopped)
+        let due = engine.catalog.get_due_deletions().await.unwrap();
+        assert_eq!(
+            due.len(),
+            1,
+            "Worker should have stopped and not processed deletion"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_configurable_deletion_grace_period() {
+        let temp_dir = TempDir::new().unwrap();
+        let base_dir = temp_dir.path().to_path_buf();
+
+        // Create engine with a custom grace period of 300 seconds (5 minutes)
+        let custom_grace_period = Duration::from_secs(300);
+        let engine = RuntimeEngine::builder()
+            .base_dir(base_dir)
+            .secret_key(test_secret_key())
+            .deletion_grace_period(custom_grace_period)
+            .build()
+            .await
+            .unwrap();
+
+        // Schedule a file deletion
+        engine
+            .schedule_file_deletion("/tmp/test_grace_period.parquet")
+            .await
+            .unwrap();
+
+        // Get the pending deletions - should not be due yet since grace period is 5 minutes
+        let pending = engine.catalog.get_due_deletions().await.unwrap();
+        assert!(
+            pending.is_empty(),
+            "With 300s grace period, deletion should not be due immediately"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_default_deletion_grace_period() {
+        let temp_dir = TempDir::new().unwrap();
+        let base_dir = temp_dir.path().to_path_buf();
+
+        // Create engine with default grace period (should be 60 seconds)
+        let engine = RuntimeEngine::builder()
+            .base_dir(base_dir)
+            .secret_key(test_secret_key())
+            .build()
+            .await
+            .unwrap();
+
+        // Schedule a file deletion
+        engine
+            .schedule_file_deletion("/tmp/test_default_grace.parquet")
+            .await
+            .unwrap();
+
+        // Verify it's not immediately due (within the grace period)
+        let pending = engine.catalog.get_due_deletions().await.unwrap();
+        assert!(
+            pending.is_empty(),
+            "With default 60s grace period, deletion should not be due immediately"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

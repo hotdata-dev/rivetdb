@@ -90,7 +90,8 @@ impl LazyTableProvider {
 
     /// Fetch the table data and update catalog
     async fn fetch_and_cache(&self) -> Result<String, DataFusionError> {
-        self.orchestrator
+        let (url, _row_count) = self
+            .orchestrator
             .cache_table(
                 &self.source,
                 self.connection_id,
@@ -98,7 +99,10 @@ impl LazyTableProvider {
                 &self.table_name,
             )
             .await
-            .map_err(|e| DataFusionError::External(format!("Failed to cache table: {}", e).into()))
+            .map_err(|e| {
+                DataFusionError::External(format!("Failed to cache table: {}", e).into())
+            })?;
+        Ok(url)
     }
 }
 

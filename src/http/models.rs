@@ -184,7 +184,7 @@ pub struct SchemaRefreshResult {
 /// Response for single table data refresh
 #[derive(Debug, Serialize)]
 pub struct TableRefreshResult {
-    pub connection_id: i32,
+    pub connection_id: String,
     pub schema_name: String,
     pub table_name: String,
     pub rows_synced: usize,
@@ -202,7 +202,7 @@ pub struct TableRefreshError {
 /// Response for connection-wide data refresh
 #[derive(Debug, Serialize)]
 pub struct ConnectionRefreshResult {
-    pub connection_id: i32,
+    pub connection_id: String,
     pub tables_refreshed: usize,
     pub tables_failed: usize,
     pub total_rows: usize,

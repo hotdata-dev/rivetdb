@@ -21,9 +21,8 @@
 //! let connections = backend.list_connections().await?;
 //! ```
 
-use crate::catalog::manager::{ConnectionInfo, PendingDeletion, TableInfo};
+use crate::catalog::manager::{ConnectionInfo, TableInfo};
 use anyhow::{anyhow, Result};
-use chrono::{DateTime, Utc};
 use sqlx::{
     query, query_as, query_scalar, ColumnIndex, Database, Decode, Encode, Executor, FromRow,
     IntoArguments, Pool, Postgres, Sqlite, Type,
@@ -79,7 +78,6 @@ where
     DB: CatalogDatabase,
     ConnectionInfo: for<'r> FromRow<'r, DB::Row>,
     TableInfo: for<'r> FromRow<'r, DB::Row>,
-    PendingDeletion: for<'r> FromRow<'r, DB::Row>,
     for<'q> &'q str: Encode<'q, DB> + Type<DB>,
     for<'q> String: Encode<'q, DB> + Type<DB>,
     for<'q> i32: Encode<'q, DB> + Type<DB>,
@@ -409,36 +407,6 @@ where
         }
 
         Ok(stale)
-    }
-
-    pub async fn schedule_file_deletion(
-        &self,
-        path: &str,
-        delete_after: DateTime<Utc>,
-    ) -> Result<()> {
-        let sql = format!(
-            "INSERT INTO pending_deletions (path, delete_after) VALUES ({}, {})",
-            DB::bind_param(1),
-            DB::bind_param(2)
-        );
-        query(&sql)
-            .bind(path)
-            .bind(delete_after.to_rfc3339())
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
-    pub async fn get_due_deletions(&self) -> Result<Vec<PendingDeletion>> {
-        let sql = format!(
-            "SELECT id, path, delete_after FROM pending_deletions WHERE delete_after <= {}",
-            DB::bind_param(1)
-        );
-        query_as::<DB, PendingDeletion>(&sql)
-            .bind(Utc::now().to_rfc3339())
-            .fetch_all(&self.pool)
-            .await
-            .map_err(Into::into)
     }
 
     pub async fn remove_pending_deletion(&self, id: i32) -> Result<()> {
