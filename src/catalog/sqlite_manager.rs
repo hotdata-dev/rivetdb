@@ -59,70 +59,6 @@ impl SqliteCatalogManager {
             catalog_path: db_path.to_string(),
         })
     }
-
-    async fn initialize_schema(pool: &SqlitePool) -> Result<()> {
-        sqlx::query(
-            r#"
-            CREATE TABLE connections (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                external_id TEXT UNIQUE NOT NULL,
-                name TEXT UNIQUE NOT NULL,
-                source_type TEXT NOT NULL,
-                config_json TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        "#,
-        )
-        .execute(pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE TABLE tables (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                connection_id INTEGER NOT NULL,
-                schema_name TEXT NOT NULL,
-                table_name TEXT NOT NULL,
-                parquet_path TEXT,
-                last_sync TIMESTAMP,
-                arrow_schema_json TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (connection_id) REFERENCES connections(id),
-                UNIQUE (connection_id, schema_name, table_name)
-            )
-        "#,
-        )
-        .execute(pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE TABLE secrets (
-                name TEXT PRIMARY KEY,
-                provider TEXT NOT NULL,
-                provider_ref TEXT,
-                status TEXT NOT NULL DEFAULT 'active',
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )
-            "#,
-        )
-        .execute(pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE TABLE encrypted_secret_values (
-                name TEXT PRIMARY KEY,
-                encrypted_value BLOB NOT NULL
-            )
-            "#,
-        )
-        .execute(pool)
-        .await?;
-
-        Ok(())
-    }
 }
 
 #[async_trait]
@@ -349,7 +285,6 @@ impl CatalogManager for SqliteCatalogManager {
     }
 }
 
-#[async_trait]
 impl CatalogMigrations for SqliteMigrationBackend {
     type Pool = SqlitePool;
 

@@ -12,7 +12,6 @@
 //! an error instructing developers to wipe/recreate the database.
 
 use anyhow::{bail, Result};
-use async_trait::async_trait;
 
 // Include the generated migration data
 include!(concat!(env!("OUT_DIR"), "/migrations.rs"));
@@ -68,7 +67,6 @@ impl std::error::Error for MissingMigration {}
 /// Each catalog backend implements this trait to provide database-specific
 /// migration logic. The trait defines methods for tracking migration state
 /// and applying schema changes.
-#[async_trait]
 pub trait CatalogMigrations: Send + Sync {
     /// The database connection pool type for this backend.
     type Pool;

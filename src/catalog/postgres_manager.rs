@@ -50,62 +50,6 @@ impl PostgresCatalogManager {
         let backend = CatalogBackend::new(pool);
         Ok(Self { backend })
     }
-
-    async fn initialize_schema(pool: &PgPool) -> Result<()> {
-        sqlx::query(
-            "CREATE TABLE connections (
-                id SERIAL PRIMARY KEY,
-                external_id TEXT UNIQUE NOT NULL,
-                name TEXT UNIQUE NOT NULL,
-                source_type TEXT NOT NULL,
-                config_json TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )",
-        )
-        .execute(pool)
-        .await?;
-
-        sqlx::query(
-            "CREATE TABLE tables (
-                id SERIAL PRIMARY KEY,
-                connection_id INTEGER NOT NULL,
-                schema_name TEXT NOT NULL,
-                table_name TEXT NOT NULL,
-                parquet_path TEXT,
-                last_sync TIMESTAMP,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                arrow_schema_json TEXT,
-                FOREIGN KEY (connection_id) REFERENCES connections(id),
-                UNIQUE (connection_id, schema_name, table_name)
-            )",
-        )
-        .execute(pool)
-        .await?;
-
-        sqlx::query(
-            "CREATE TABLE secrets (
-                name TEXT PRIMARY KEY,
-                provider TEXT NOT NULL,
-                provider_ref TEXT,
-                status TEXT NOT NULL DEFAULT 'active',
-                created_at TIMESTAMPTZ NOT NULL,
-                updated_at TIMESTAMPTZ NOT NULL
-            )",
-        )
-        .execute(pool)
-        .await?;
-
-        sqlx::query(
-            "CREATE TABLE encrypted_secret_values (
-                name TEXT PRIMARY KEY,
-                encrypted_value BYTEA NOT NULL
-            )",
-        )
-        .execute(pool)
-        .await?;
-
-        Ok(())
-    }
 }
 
 struct PostgresMigrationBackend;
@@ -336,7 +280,6 @@ impl Debug for PostgresCatalogManager {
     }
 }
 
-#[async_trait]
 impl CatalogMigrations for PostgresMigrationBackend {
     type Pool = PgPool;
 
