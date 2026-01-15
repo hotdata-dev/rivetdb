@@ -706,6 +706,37 @@ impl RuntimeEngine {
 
         Ok(deleted)
     }
+
+    /// Start background task that processes pending deletions every 30 seconds.
+    fn start_deletion_worker(&self) {
+        let catalog = self.catalog.clone();
+        let storage = self.storage.clone();
+
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            loop {
+                interval.tick().await;
+
+                let pending = match catalog.get_due_deletions().await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        warn!("Failed to get pending deletions: {}", e);
+                        continue;
+                    }
+                };
+
+                for deletion in pending {
+                    if let Err(e) = storage.delete(&deletion.path).await {
+                        warn!("Failed to delete {}: {}", deletion.path, e);
+                        continue;
+                    }
+                    if let Err(e) = catalog.remove_pending_deletion(deletion.id).await {
+                        warn!("Failed to remove deletion record {}: {}", deletion.id, e);
+                    }
+                }
+            }
+        });
+    }
 }
 
 impl Drop for RuntimeEngine {
@@ -925,6 +956,14 @@ impl RuntimeEngineBuilder {
         engine
             .df_ctx
             .register_catalog("runtimedb", runtimedb_catalog);
+
+        // Process any pending deletions from previous runs
+        if let Err(e) = engine.process_pending_deletions().await {
+            warn!("Failed to process pending deletions on startup: {}", e);
+        }
+
+        // Start background deletion worker
+        engine.start_deletion_worker();
 
         Ok(engine)
     }
