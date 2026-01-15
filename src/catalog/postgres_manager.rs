@@ -1,7 +1,7 @@
 use crate::catalog::backend::CatalogBackend;
 use crate::catalog::manager::{CatalogManager, ConnectionInfo, OptimisticLock, TableInfo};
 use crate::catalog::migrations::{
-    run_migrations, CatalogMigrations, Migration, POSTGRES_MIGRATIONS,
+    run_migrations, wrap_migration_sql, CatalogMigrations, Migration, POSTGRES_MIGRATIONS,
 };
 use crate::secrets::{SecretMetadata, SecretStatus};
 use anyhow::Result;
@@ -309,11 +309,7 @@ impl CatalogMigrations for PostgresMigrationBackend {
     }
 
     async fn apply_migration(pool: &Self::Pool, version: i64, hash: &str, sql: &str) -> Result<()> {
-        // Wrap migration SQL and version recording in a transaction
-        let wrapped_sql = format!(
-            "BEGIN;\n{}\nINSERT INTO schema_migrations (version, hash) VALUES ({}, '{}');\nCOMMIT;",
-            sql, version, hash
-        );
+        let wrapped_sql = wrap_migration_sql(sql, version, hash);
         sqlx::raw_sql(&wrapped_sql).execute(pool).await?;
         Ok(())
     }

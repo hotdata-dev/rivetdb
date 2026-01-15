@@ -45,6 +45,16 @@ fn main() {
                         if let Some(version) = parse_version(&sql_path) {
                             let content = fs::read_to_string(&sql_path)
                                 .unwrap_or_else(|_| panic!("Failed to read {:?}", sql_path));
+
+                            // Check for raw string delimiter that would break generated code
+                            if content.contains("\"##") {
+                                panic!(
+                                    "Migration {:?} contains '\"##' which breaks raw string literals. \
+                                     Please rewrite the SQL to avoid this sequence.",
+                                    sql_path
+                                );
+                            }
+
                             let hash = sha256_hex(&content);
 
                             println!("cargo:rerun-if-changed={}", sql_path.display());

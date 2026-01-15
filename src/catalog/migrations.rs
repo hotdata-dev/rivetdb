@@ -62,6 +62,27 @@ impl std::fmt::Display for MissingMigration {
 
 impl std::error::Error for MissingMigration {}
 
+/// Error returned when the database has migrations not present in the compiled list.
+#[derive(Debug)]
+pub struct UnknownMigration {
+    pub version: i64,
+    pub max_compiled: i64,
+}
+
+impl std::fmt::Display for UnknownMigration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Database has migration v{} but compiled code only knows up to v{}!\n\
+             The database was created with a newer version of the application.\n\
+             During development, you should wipe and recreate the database.",
+            self.version, self.max_compiled
+        )
+    }
+}
+
+impl std::error::Error for UnknownMigration {}
+
 /// Trait for implementing catalog schema migrations.
 ///
 /// Each catalog backend implements this trait to provide database-specific
@@ -84,6 +105,21 @@ pub trait CatalogMigrations: Send + Sync {
     async fn apply_migration(pool: &Self::Pool, version: i64, hash: &str, sql: &str) -> Result<()>;
 }
 
+/// Wraps migration SQL in a transaction with version recording.
+///
+/// The returned SQL includes BEGIN/COMMIT to run atomically. If an error occurs
+/// mid-transaction, the connection may be left in an aborted state until it is
+/// returned to the pool and recycled. This is acceptable for migrations since
+/// they run at startup and a failure is fatal anyway.
+///
+/// Note: build.rs validates that migrations don't contain `{}` or `"##` sequences.
+pub fn wrap_migration_sql(sql: &str, version: i64, hash: &str) -> String {
+    format!(
+        "BEGIN;\n{}\nINSERT INTO schema_migrations (version, hash) VALUES ({}, '{}');\nCOMMIT;",
+        sql, version, hash
+    )
+}
+
 /// Runs all pending migrations for a catalog backend.
 pub async fn run_migrations<M: CatalogMigrations>(pool: &M::Pool) -> Result<()> {
     M::ensure_migrations_table(pool).await?;
@@ -94,6 +130,19 @@ pub async fn run_migrations<M: CatalogMigrations>(pool: &M::Pool) -> Result<()> 
     // Build a map of applied version -> hash for quick lookup
     let applied_map: std::collections::HashMap<i64, String> = applied.into_iter().collect();
     let max_applied = applied_map.keys().max().copied().unwrap_or(0);
+    let compiled_versions: std::collections::HashSet<i64> =
+        migrations.iter().map(|m| m.version).collect();
+    let max_compiled = compiled_versions.iter().max().copied().unwrap_or(0);
+
+    // Check for migrations in DB that don't exist in compiled code
+    for &applied_version in applied_map.keys() {
+        if !compiled_versions.contains(&applied_version) {
+            bail!(UnknownMigration {
+                version: applied_version,
+                max_compiled,
+            });
+        }
+    }
 
     // Verify hashes and check for missing intermediate migrations
     for migration in migrations {
@@ -121,4 +170,23 @@ pub async fn run_migrations<M: CatalogMigrations>(pool: &M::Pool) -> Result<()> 
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wrap_migration_sql_wraps_correctly() {
+        let sql = "CREATE TABLE foo (id INT)";
+        let result = wrap_migration_sql(sql, 1, "abc123");
+
+        assert!(result.contains("BEGIN;"));
+        assert!(result.contains("CREATE TABLE foo (id INT)"));
+        assert!(result.contains("VALUES (1, 'abc123')"));
+        assert!(result.contains("COMMIT;"));
+    }
+
+    // Note: Curly brace validation is done at compile time in build.rs,
+    // which rejects migrations containing `{}` or `"##` sequences.
 }

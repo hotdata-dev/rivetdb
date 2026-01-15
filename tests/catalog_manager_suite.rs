@@ -530,15 +530,15 @@ async fn sqlite_migration_hash_mismatch_fails() {
     assert!(err.contains("tampered_hash"));
 }
 
-/// Test that missing intermediate migrations are detected.
-/// This simulates the scenario where v2 was applied but v1 is missing from the database.
+/// Test that unknown migrations in DB (newer than compiled code) are detected.
+/// This simulates the scenario where the DB has a migration version that doesn't exist in code.
 #[tokio::test]
-async fn sqlite_missing_migration_fails() {
+async fn sqlite_unknown_migration_fails() {
     let dir = TempDir::new().expect("failed to create temp dir");
     let db_path = dir.path().join("catalog.sqlite");
     let db_uri = format!("sqlite:{}?mode=rwc", db_path.display());
 
-    // Manually create schema_migrations table with only v2 (skipping v1)
+    // Manually create schema_migrations table with v2 (which doesn't exist in compiled code)
     let pool = SqlitePool::connect(&db_uri).await.unwrap();
     sqlx::query(
         "CREATE TABLE schema_migrations (
@@ -556,7 +556,7 @@ async fn sqlite_missing_migration_fails() {
         .unwrap();
     pool.close().await;
 
-    // Try to run migrations - should fail because v1 is missing
+    // Try to run migrations - should fail because v2 doesn't exist in compiled code
     let manager = SqliteCatalogManager::new(db_path.to_str().unwrap())
         .await
         .unwrap();
@@ -565,8 +565,8 @@ async fn sqlite_missing_migration_fails() {
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
     assert!(
-        err.contains("missing") && err.contains("v1"),
-        "Expected error about missing v1, got: {}",
+        err.contains("v2") && err.contains("only knows up to"),
+        "Expected error about unknown migration v2, got: {}",
         err
     );
 }
