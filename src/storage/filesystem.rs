@@ -107,6 +107,20 @@ impl StorageManager for FilesystemStorage {
             .join(format!("{}.parquet", table)) // file inside directory
     }
 
+    fn prepare_versioned_cache_write(
+        &self,
+        connection_id: i32,
+        schema: &str,
+        table: &str,
+    ) -> PathBuf {
+        let version = nanoid::nanoid!(8);
+        self.cache_base
+            .join(connection_id.to_string())
+            .join(schema)
+            .join(table)
+            .join(format!("{}_v{}.parquet", table, version))
+    }
+
     async fn finalize_cache_write(
         &self,
         _written_path: &Path,

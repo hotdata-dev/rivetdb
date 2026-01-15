@@ -52,6 +52,15 @@ pub trait StorageManager: Debug + Send + Sync {
         table: &str,
     ) -> std::path::PathBuf;
 
+    /// Prepare a versioned cache write path for atomic refresh.
+    /// Returns a local path with unique suffix to avoid overwriting existing cache.
+    fn prepare_versioned_cache_write(
+        &self,
+        connection_id: i32,
+        schema: &str,
+        table: &str,
+    ) -> std::path::PathBuf;
+
     /// Finalizes the cache write after Parquet file is written.
     /// For local storage: no-op (file already in place), returns URL.
     /// For remote storage: uploads temp file to storage, cleans up temp, returns URL.

@@ -158,6 +158,20 @@ impl StorageManager for S3Storage {
         std::env::temp_dir().join(format!("{}-{}.parquet", table, uuid::Uuid::new_v4()))
     }
 
+    fn prepare_versioned_cache_write(
+        &self,
+        connection_id: i32,
+        schema: &str,
+        table: &str,
+    ) -> std::path::PathBuf {
+        let version = nanoid::nanoid!(8);
+        std::env::temp_dir()
+            .join(connection_id.to_string())
+            .join(schema)
+            .join(table)
+            .join(format!("{}_v{}.parquet", table, version))
+    }
+
     async fn finalize_cache_write(
         &self,
         written_path: &std::path::Path,
