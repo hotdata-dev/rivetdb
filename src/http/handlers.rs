@@ -248,7 +248,7 @@ pub async fn create_connection_handler(
     let source_type = source.source_type().to_string();
 
     // Step 1: Register the connection
-    engine
+    let conn_id = engine
         .register_connection(&request.name, source)
         .await
         .map_err(|e| {
@@ -258,8 +258,8 @@ pub async fn create_connection_handler(
 
     // Step 2: Attempt discovery - catch errors and return partial success
     let (tables_discovered, discovery_status, discovery_error) =
-        match engine.discover_connection(&request.name).await {
-            Ok(count) => (count, DiscoveryStatus::Success, None),
+        match engine.refresh_schema(conn_id).await {
+            Ok((added, _, _)) => (added, DiscoveryStatus::Success, None),
             Err(e) => {
                 let root_cause = e.root_cause().to_string();
                 let msg = root_cause
@@ -307,10 +307,10 @@ pub async fn discover_connection_handler(
         .await?
         .ok_or_else(|| ApiError::not_found(format!("Connection '{}' not found", connection_id)))?;
 
-    // Attempt discovery using connection name
+    // Attempt discovery using connection id
     let (tables_discovered, discovery_status, discovery_error) =
-        match engine.discover_connection(&conn.name).await {
-            Ok(count) => (count, DiscoveryStatus::Success, None),
+        match engine.refresh_schema(conn.id).await {
+            Ok((added, _, _)) => (added, DiscoveryStatus::Success, None),
             Err(e) => {
                 let root_cause = e.root_cause().to_string();
                 let msg = root_cause

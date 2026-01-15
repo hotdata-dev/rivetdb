@@ -1,5 +1,5 @@
 use crate::catalog::{CatalogManager, ConnectionInfo, SqliteCatalogManager, TableInfo};
-use crate::datafetch::{DataFetcher, FetchOrchestrator, NativeFetcher};
+use crate::datafetch::{FetchOrchestrator, NativeFetcher};
 use crate::datafusion::{
     block_on, InformationSchemaProvider, RuntimeCatalogProvider, RuntimeDbCatalogProvider,
 };
@@ -239,7 +239,7 @@ impl RuntimeEngine {
     ///
     /// This persists the connection config to the catalog and registers it with DataFusion,
     /// but does not attempt to connect to the remote database or discover tables.
-    /// Use `discover_connection()` to discover tables after registration.
+    /// Use `refresh_schema()` to discover tables after registration.
     pub async fn register_connection(&self, name: &str, source: Source) -> Result<i32> {
         let source_type = source.source_type();
 
@@ -266,57 +266,13 @@ impl RuntimeEngine {
         Ok(conn_id)
     }
 
-    /// Discover tables for an existing connection.
-    ///
-    /// Connects to the remote database, discovers available tables, and stores
-    /// their metadata in the catalog. Returns the number of tables discovered.
-    pub async fn discover_connection(&self, name: &str) -> Result<usize> {
-        // Get connection info
-        let conn = self
-            .catalog
-            .get_connection(name)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("Connection '{}' not found", name))?;
-
-        let source: Source = serde_json::from_str(&conn.config_json)?;
-        let source_type = source.source_type();
-
-        // Discover tables
-        info!("Discovering tables for {} source...", source_type);
-        let fetcher = crate::datafetch::NativeFetcher::new();
-        let tables = fetcher
-            .discover_tables(&source, &self.secret_manager)
-            .await
-            .map_err(|e| anyhow::anyhow!("Discovery failed: {}", e))?;
-
-        info!("Discovered {} tables", tables.len());
-
-        // Add discovered tables to catalog with schema
-        for table in &tables {
-            let schema = table.to_arrow_schema();
-            let schema_json = serde_json::to_string(schema.as_ref())
-                .map_err(|e| anyhow::anyhow!("Failed to serialize schema: {}", e))?;
-            self.catalog
-                .add_table(conn.id, &table.schema_name, &table.table_name, &schema_json)
-                .await?;
-        }
-
-        info!(
-            "Connection '{}' discovery complete: {} tables",
-            name,
-            tables.len()
-        );
-
-        Ok(tables.len())
-    }
-
     /// Connect to a new external data source and register it as a catalog.
     ///
     /// This is a convenience method that combines `register_connection()` and
-    /// `discover_connection()`. For more control, use those methods separately.
+    /// `refresh_schema()`. For more control, use those methods separately.
     pub async fn connect(&self, name: &str, source: Source) -> Result<()> {
-        self.register_connection(name, source).await?;
-        self.discover_connection(name).await?;
+        let conn_id = self.register_connection(name, source).await?;
+        self.refresh_schema(conn_id).await?;
         Ok(())
     }
 
