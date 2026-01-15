@@ -437,3 +437,104 @@ impl CatalogMigrations for SqliteMigrationBackend {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    #[tokio::test]
+    async fn test_delete_stale_tables_removes_missing() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let manager = SqliteCatalogManager::new(db_path.to_str().unwrap())
+            .await
+            .unwrap();
+        manager.run_migrations().await.unwrap();
+
+        // Add connection and tables
+        let conn_id = manager
+            .add_connection("test", "duckdb", r#"{"type":"duckdb","path":"test.db"}"#)
+            .await
+            .unwrap();
+        manager
+            .add_table(conn_id, "main", "table_a", "{}")
+            .await
+            .unwrap();
+        manager
+            .add_table(conn_id, "main", "table_b", "{}")
+            .await
+            .unwrap();
+        manager
+            .add_table(conn_id, "main", "table_c", "{}")
+            .await
+            .unwrap();
+
+        // Delete stale tables (only keep A and B)
+        let current = vec![
+            ("main".to_string(), "table_a".to_string()),
+            ("main".to_string(), "table_b".to_string()),
+        ];
+        let deleted = manager
+            .delete_stale_tables(conn_id, &current)
+            .await
+            .unwrap();
+
+        assert_eq!(deleted.len(), 1);
+        assert_eq!(deleted[0].table_name, "table_c");
+
+        // Verify only A and B remain
+        let remaining = manager.list_tables(Some(conn_id)).await.unwrap();
+        assert_eq!(remaining.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_pending_deletions_crud() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let manager = SqliteCatalogManager::new(db_path.to_str().unwrap())
+            .await
+            .unwrap();
+        manager.run_migrations().await.unwrap();
+
+        // Schedule a deletion in the past (should be due immediately)
+        let past = Utc::now() - chrono::Duration::seconds(10);
+        manager
+            .schedule_file_deletion("/tmp/test.parquet", past)
+            .await
+            .unwrap();
+
+        // Get due deletions
+        let due = manager.get_due_deletions().await.unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].path, "/tmp/test.parquet");
+
+        // Remove the deletion
+        manager.remove_pending_deletion(due[0].id).await.unwrap();
+
+        // Verify it's gone
+        let due = manager.get_due_deletions().await.unwrap();
+        assert!(due.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_pending_deletions_respects_time() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let manager = SqliteCatalogManager::new(db_path.to_str().unwrap())
+            .await
+            .unwrap();
+        manager.run_migrations().await.unwrap();
+
+        // Schedule a deletion in the future
+        let future = Utc::now() + chrono::Duration::seconds(3600);
+        manager
+            .schedule_file_deletion("/tmp/future.parquet", future)
+            .await
+            .unwrap();
+
+        // Should not be due yet
+        let due = manager.get_due_deletions().await.unwrap();
+        assert!(due.is_empty());
+    }
+}
