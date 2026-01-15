@@ -3,14 +3,17 @@ use crate::datafetch::{DataFetcher, FetchOrchestrator, NativeFetcher};
 use crate::datafusion::{
     block_on, InformationSchemaProvider, RuntimeCatalogProvider, RuntimeDbCatalogProvider,
 };
+use crate::http::models::SchemaRefreshResult;
 use crate::secrets::{EncryptedCatalogBackend, SecretManager, ENCRYPTED_PROVIDER_TYPE};
 use crate::source::Source;
 use crate::storage::{FilesystemStorage, StorageManager};
 use anyhow::Result;
+use chrono::Utc;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::catalog::CatalogProvider;
 use datafusion::prelude::*;
 use log::{info, warn};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -481,6 +484,102 @@ impl RuntimeEngine {
     /// This should be called before the application exits to ensure proper cleanup.
     pub async fn shutdown(&self) -> Result<()> {
         self.catalog.close().await
+    }
+
+    /// Schedule file deletion after grace period (persisted to database).
+    async fn schedule_file_deletion(&self, path: &str) -> Result<()> {
+        let delete_after = Utc::now() + chrono::Duration::seconds(60);
+        self.catalog
+            .schedule_file_deletion(path, delete_after)
+            .await
+    }
+
+    /// Refresh schema for a connection. Re-discovers tables from remote,
+    /// preserving cached data for existing tables, and removes stale tables.
+    /// Returns counts of (added, removed, modified).
+    pub async fn refresh_schema(&self, connection_id: i32) -> Result<(usize, usize, usize)> {
+        let conn = self
+            .catalog
+            .get_connection_by_id(connection_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Connection not found"))?;
+
+        let existing_tables = self.catalog.list_tables(Some(connection_id)).await?;
+        let existing_set: HashSet<(String, String)> = existing_tables
+            .iter()
+            .map(|t| (t.schema_name.clone(), t.table_name.clone()))
+            .collect();
+
+        let source: Source = serde_json::from_str(&conn.config_json)?;
+        let discovered = self.orchestrator.discover_tables(&source).await?;
+
+        let current_set: HashSet<(String, String)> = discovered
+            .iter()
+            .map(|t| (t.schema_name.clone(), t.table_name.clone()))
+            .collect();
+
+        let added_count = current_set.difference(&existing_set).count();
+        let removed_count = existing_set.difference(&current_set).count();
+
+        let mut modified = 0;
+        for table in &discovered {
+            let schema_json = serde_json::to_string(&table.to_arrow_schema())?;
+
+            if let Some(existing) = existing_tables
+                .iter()
+                .find(|t| t.schema_name == table.schema_name && t.table_name == table.table_name)
+            {
+                if existing.arrow_schema_json.as_ref() != Some(&schema_json) {
+                    modified += 1;
+                }
+            }
+
+            self.catalog
+                .add_table(
+                    connection_id,
+                    &table.schema_name,
+                    &table.table_name,
+                    &schema_json,
+                )
+                .await?;
+        }
+
+        let current_table_list: Vec<_> = current_set.into_iter().collect();
+        let deleted_tables = self
+            .catalog
+            .delete_stale_tables(connection_id, &current_table_list)
+            .await?;
+
+        for table_info in deleted_tables {
+            if let Some(path) = table_info.parquet_path {
+                self.schedule_file_deletion(&path).await?;
+            }
+        }
+
+        Ok((added_count, removed_count, modified))
+    }
+
+    /// Refresh schema for all connections.
+    pub async fn refresh_all_schemas(&self) -> Result<SchemaRefreshResult> {
+        let connections = self.catalog.list_connections().await?;
+        let mut result = SchemaRefreshResult {
+            connections_refreshed: 0,
+            tables_discovered: 0,
+            tables_added: 0,
+            tables_removed: 0,
+            tables_modified: 0,
+        };
+
+        for conn in connections {
+            let (added, removed, modified) = self.refresh_schema(conn.id).await?;
+            result.connections_refreshed += 1;
+            result.tables_added += added;
+            result.tables_removed += removed;
+            result.tables_modified += modified;
+        }
+
+        result.tables_discovered = self.catalog.list_tables(None).await?.len();
+        Ok(result)
     }
 }
 
