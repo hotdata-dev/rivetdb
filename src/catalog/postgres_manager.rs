@@ -1,5 +1,7 @@
 use crate::catalog::backend::CatalogBackend;
-use crate::catalog::manager::{CatalogManager, ConnectionInfo, OptimisticLock, TableInfo};
+use crate::catalog::manager::{
+    CatalogManager, ConnectionInfo, OptimisticLock, PendingDeletion, TableInfo,
+};
 use crate::catalog::migrations::{run_migrations, CatalogMigrations};
 use crate::secrets::{SecretMetadata, SecretStatus};
 use anyhow::Result;
@@ -380,6 +382,34 @@ impl CatalogManager for PostgresCatalogManager {
             .into_iter()
             .map(SecretMetadataRow::into_metadata)
             .collect())
+    }
+
+    async fn get_connection_by_id(&self, id: i32) -> Result<Option<ConnectionInfo>> {
+        self.backend.get_connection_by_id(id).await
+    }
+
+    async fn delete_stale_tables(
+        &self,
+        connection_id: i32,
+        current_tables: &[(String, String)],
+    ) -> Result<Vec<TableInfo>> {
+        self.backend
+            .delete_stale_tables(connection_id, current_tables)
+            .await
+    }
+
+    async fn schedule_file_deletion(&self, path: &str, delete_after: DateTime<Utc>) -> Result<()> {
+        self.backend
+            .schedule_file_deletion(path, delete_after)
+            .await
+    }
+
+    async fn get_due_deletions(&self) -> Result<Vec<PendingDeletion>> {
+        self.backend.get_due_deletions().await
+    }
+
+    async fn remove_pending_deletion(&self, id: i32) -> Result<()> {
+        self.backend.remove_pending_deletion(id).await
     }
 }
 
