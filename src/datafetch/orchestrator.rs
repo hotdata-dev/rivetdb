@@ -102,6 +102,8 @@ impl FetchOrchestrator {
     /// Writes to new versioned path, then atomically updates catalog.
     /// If catalog update fails, cleans up orphaned files to prevent storage leaks.
     /// Returns (new_url, old_path, rows_synced).
+    ///
+    /// Returns an error if the table doesn't exist in the catalog (use cache_table for initial sync).
     pub async fn refresh_table(
         &self,
         source: &Source,
@@ -109,12 +111,19 @@ impl FetchOrchestrator {
         schema_name: &str,
         table_name: &str,
     ) -> Result<(String, Option<String>, usize)> {
-        // 1. Get current path (will be deleted after grace period)
+        // 1. Verify table exists in catalog before doing any expensive I/O.
+        // This catches typos early and avoids wasted fetches.
         let old_info = self
             .catalog
             .get_table(connection_id, schema_name, table_name)
             .await?;
-        let old_path = old_info.as_ref().and_then(|i| i.parquet_path.clone());
+
+        let old_info = old_info.ok_or_else(|| DataFetchError::TableNotFound {
+            connection_id,
+            schema: schema_name.to_string(),
+            table: table_name.to_string(),
+        })?;
+        let old_path = old_info.parquet_path.clone();
 
         // 2. Prepare cache write (generates versioned path)
         let handle = self
@@ -715,7 +724,7 @@ mod tests {
         let catalog = Arc::new(MockCatalog::new());
         let secret_manager = Arc::new(create_test_secret_manager(temp_dir.path()).await);
 
-        // Don't add the table - it should fail when trying to get table info
+        // Don't add the table - it should fail early with TableNotFound
 
         let orchestrator =
             FetchOrchestrator::new(fetcher, storage.clone(), catalog, secret_manager);
@@ -729,13 +738,19 @@ mod tests {
             .await;
 
         assert!(result.is_err(), "refresh_table should fail");
+        let err = result.unwrap_err();
         assert!(
-            result.unwrap_err().to_string().contains("not found"),
-            "Error should indicate table not found"
+            err.to_string().contains("not found"),
+            "Error should indicate table not found: {}",
+            err
         );
 
-        // Verify that cleanup was attempted for the written file
+        // Verify no cleanup was needed - the early existence check prevents any I/O
         let deleted = storage.get_deleted_urls();
-        assert_eq!(deleted.len(), 1, "Should have cleaned up the orphaned file");
+        assert_eq!(
+            deleted.len(),
+            0,
+            "No cleanup should be needed since we fail before writing any data"
+        );
     }
 }

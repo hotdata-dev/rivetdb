@@ -32,6 +32,14 @@ pub enum DataFetchError {
     /// Failed to serialize or deserialize Arrow schema
     #[error("schema serialization failed: {0}")]
     SchemaSerialization(String),
+
+    /// Requested table not found in catalog
+    #[error("table not found: {schema}.{table} (connection {connection_id})")]
+    TableNotFound {
+        connection_id: i32,
+        schema: String,
+        table: String,
+    },
 }
 
 impl From<std::io::Error> for DataFetchError {

@@ -79,8 +79,19 @@ impl IntoResponse for ApiError {
 /// Convert anyhow::Error to ApiError
 impl From<anyhow::Error> for ApiError {
     fn from(err: anyhow::Error) -> Self {
-        // For now, treat all anyhow errors as internal server errors
-        // TODO: Parse error messages to classify as 400 vs 500
+        // Check for specific error types that should map to non-500 status codes
+        if let Some(e) = err.downcast_ref::<crate::datafetch::DataFetchError>() {
+            use crate::datafetch::DataFetchError;
+            let constructor = match e {
+                DataFetchError::TableNotFound { .. } => ApiError::not_found,
+                DataFetchError::UnsupportedDriver(_) | DataFetchError::DriverLoad(_) => {
+                    ApiError::bad_request
+                }
+                _ => ApiError::internal_error,
+            };
+            return constructor(err.to_string());
+        }
+        // Default to internal server error for unknown errors
         ApiError::internal_error(err.to_string())
     }
 }
@@ -99,6 +110,25 @@ impl From<crate::secrets::SecretError> for ApiError {
             SecretError::Backend(_) | SecretError::InvalidUtf8 | SecretError::Database(_) => {
                 ApiError::internal_error
             }
+        };
+        constructor(e.to_string())
+    }
+}
+
+/// Convert DataFetchError to ApiError
+impl From<crate::datafetch::DataFetchError> for ApiError {
+    fn from(e: crate::datafetch::DataFetchError) -> Self {
+        use crate::datafetch::DataFetchError;
+        let constructor = match &e {
+            DataFetchError::TableNotFound { .. } => ApiError::not_found,
+            DataFetchError::UnsupportedDriver(_) | DataFetchError::DriverLoad(_) => {
+                ApiError::bad_request
+            }
+            DataFetchError::Connection(_)
+            | DataFetchError::Query(_)
+            | DataFetchError::Storage(_)
+            | DataFetchError::Discovery(_)
+            | DataFetchError::SchemaSerialization(_) => ApiError::internal_error,
         };
         constructor(e.to_string())
     }
