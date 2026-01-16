@@ -110,13 +110,6 @@ impl RefreshTestHarness {
         .expect("Failed to create table");
     }
 
-    /// Remove a table from a DuckDB
-    fn remove_table_from_duckdb(db_path: &str, schema: &str, table: &str) {
-        let conn = duckdb::Connection::open(db_path).expect("Failed to open DuckDB");
-        conn.execute(&format!("DROP TABLE {}.{}", schema, table), [])
-            .expect("Failed to drop table");
-    }
-
     /// Create a connection via API and return the connection_id
     async fn create_connection(&self, name: &str, db_path: &str) -> Result<String> {
         let response = self
@@ -994,7 +987,7 @@ async fn test_data_refresh_schedules_pending_deletion() -> Result<()> {
     let initial_cache_dir = initial_cache_path.strip_prefix("file://").unwrap();
     let files_before: Vec<_> = std::fs::read_dir(initial_cache_dir)?
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map_or(false, |ext| ext == "parquet"))
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "parquet"))
         .collect();
     assert_eq!(
         files_before.len(),
@@ -1041,7 +1034,7 @@ async fn test_data_refresh_schedules_pending_deletion() -> Result<()> {
     let new_cache_dir = new_cache_path.strip_prefix("file://").unwrap();
     let files_in_new_version: Vec<_> = std::fs::read_dir(new_cache_dir)?
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map_or(false, |ext| ext == "parquet"))
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "parquet"))
         .collect();
     assert_eq!(
         files_in_new_version.len(),
@@ -1557,7 +1550,7 @@ async fn test_concurrent_schema_and_data_refresh() -> Result<()> {
     // Verify final state is consistent
     let tables = harness.engine.list_tables(Some("test_conn")).await?;
     assert!(
-        tables.len() >= 1,
+        !tables.is_empty(),
         "Should have at least one table after concurrent refresh"
     );
 
