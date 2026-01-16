@@ -487,11 +487,11 @@ impl RuntimeEngine {
     /// Refresh schema for a connection. Re-discovers tables from remote,
     /// preserving cached data for existing tables.
     ///
-    /// NOTE: Stale table detection (tables removed from remote) is not implemented.
-    /// Tables that no longer exist in the remote source will remain in the catalog.
+    /// Tables that no longer exist in the remote source will remain in the catalog
+    /// (they are not automatically deleted).
     ///
-    /// Returns counts of (added, removed, modified). `removed` is always 0 for now.
-    pub async fn refresh_schema(&self, connection_id: i32) -> Result<(usize, usize, usize)> {
+    /// Returns counts of (added, modified).
+    pub async fn refresh_schema(&self, connection_id: i32) -> Result<(usize, usize)> {
         let conn = self
             .catalog
             .get_connection_by_id(connection_id)
@@ -513,8 +513,6 @@ impl RuntimeEngine {
             .collect();
 
         let added_count = current_set.difference(&existing_set).count();
-        // NOTE: We report removed tables but don't actually delete them
-        let removed_count = existing_set.difference(&current_set).count();
 
         let mut modified = 0;
         for table in &discovered {
@@ -539,7 +537,7 @@ impl RuntimeEngine {
                 .await?;
         }
 
-        Ok((added_count, removed_count, modified))
+        Ok((added_count, modified))
     }
 
     /// Refresh schema for all connections.
@@ -549,15 +547,13 @@ impl RuntimeEngine {
             connections_refreshed: 0,
             tables_discovered: 0,
             tables_added: 0,
-            tables_removed: 0,
             tables_modified: 0,
         };
 
         for conn in connections {
-            let (added, removed, modified) = self.refresh_schema(conn.id).await?;
+            let (added, modified) = self.refresh_schema(conn.id).await?;
             result.connections_refreshed += 1;
             result.tables_added += added;
-            result.tables_removed += removed;
             result.tables_modified += modified;
         }
 

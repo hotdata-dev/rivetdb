@@ -220,57 +220,6 @@ async fn test_refresh_schema_detects_new_tables() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_refresh_schema_detects_removed_tables() -> Result<()> {
-    let harness = RefreshTestHarness::new().await?;
-
-    // Create a DuckDB with multiple tables
-    let db_path = harness.create_duckdb_multi_table("removal_test");
-
-    // Create connection
-    let connection_id = harness.create_connection("test_conn", &db_path).await?;
-
-    // Remove a table from the DuckDB
-    RefreshTestHarness::remove_table_from_duckdb(&db_path, "sales", "products");
-
-    // Refresh schema
-    let response = harness
-        .router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(PATH_REFRESH)
-                .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_string(&json!({
-                    "connection_id": connection_id
-                }))?))?,
-        )
-        .await?;
-
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
-    let json: serde_json::Value = serde_json::from_slice(&body)?;
-
-    assert_eq!(json["connections_refreshed"], 1);
-    // tables_discovered reflects catalog state (stale tables are NOT deleted)
-    assert_eq!(json["tables_discovered"], 2); // orders + products (stale) remain in catalog
-                                              // NOTE: tables_removed reports detection but doesn't delete from catalog.
-                                              // Stale table cleanup is intentionally not implemented.
-    assert_eq!(json["tables_removed"], 1); // products was detected as removed from remote
-
-    // Verify products table still exists in catalog (stale tables are not deleted)
-    let tables = harness.engine.list_tables(Some("test_conn")).await?;
-    let products_exists = tables.iter().any(|t| t.table_name == "products");
-    assert!(
-        products_exists,
-        "products table should still exist in catalog (stale table cleanup not implemented)"
-    );
-
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn test_refresh_schema_preserves_cached_data() -> Result<()> {
     let harness = RefreshTestHarness::new().await?;
 
@@ -1112,70 +1061,6 @@ async fn test_data_refresh_schedules_pending_deletion() -> Result<()> {
     assert!(
         due.is_empty(),
         "deletions should not be due immediately (60s grace period)"
-    );
-
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn test_schema_refresh_reports_removed_tables_but_keeps_them() -> Result<()> {
-    // NOTE: This test verifies that stale tables are detected but NOT deleted.
-    // Stale table cleanup is intentionally not implemented to avoid data loss.
-    let harness = RefreshTestHarness::new().await?;
-
-    // Create a DuckDB with multiple tables
-    let db_path = harness.create_duckdb_multi_table("schema_deletion_test");
-
-    // Create connection
-    let connection_id = harness.create_connection("test_conn", &db_path).await?;
-
-    // Query products table to trigger sync
-    harness
-        .engine
-        .execute_query("SELECT * FROM test_conn.sales.products")
-        .await?;
-
-    // Verify products has cached data
-    let tables = harness.engine.list_tables(Some("test_conn")).await?;
-    let products_cached = tables
-        .iter()
-        .find(|t| t.table_name == "products")
-        .and_then(|t| t.parquet_path.as_ref())
-        .is_some();
-    assert!(products_cached, "products should have cached data");
-
-    // Remove products table from DuckDB
-    RefreshTestHarness::remove_table_from_duckdb(&db_path, "sales", "products");
-
-    // Refresh schema
-    let response = harness
-        .router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(PATH_REFRESH)
-                .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_string(&json!({
-                    "connection_id": connection_id
-                }))?))?,
-        )
-        .await?;
-
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
-    let json: serde_json::Value = serde_json::from_slice(&body)?;
-
-    // Verify table removal was detected
-    assert_eq!(json["tables_removed"], 1);
-
-    // Verify products table STILL exists (stale tables are not deleted)
-    let tables = harness.engine.list_tables(Some("test_conn")).await?;
-    let products_exists = tables.iter().any(|t| t.table_name == "products");
-    assert!(
-        products_exists,
-        "products table should still exist (stale table cleanup not implemented)"
     );
 
     Ok(())

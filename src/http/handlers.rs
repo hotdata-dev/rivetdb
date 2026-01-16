@@ -258,7 +258,7 @@ pub async fn create_connection_handler(
     // Step 2: Attempt discovery - catch errors and return partial success
     let (tables_discovered, discovery_status, discovery_error) =
         match engine.refresh_schema(conn_id).await {
-            Ok((added, _, _)) => (added, DiscoveryStatus::Success, None),
+            Ok((added, _)) => (added, DiscoveryStatus::Success, None),
             Err(e) => {
                 let root_cause = e.root_cause().to_string();
                 let msg = root_cause
@@ -557,13 +557,12 @@ pub async fn refresh_handler(
 
         // Schema refresh: single connection
         (Some((conn_id, _)), None, None, false) => {
-            let (added, removed, modified) = engine.refresh_schema(conn_id).await?;
+            let (added, modified) = engine.refresh_schema(conn_id).await?;
             let tables = engine.catalog().list_tables(Some(conn_id)).await?;
             RefreshResponse::Schema(SchemaRefreshResult {
                 connections_refreshed: 1,
                 tables_discovered: tables.len(),
                 tables_added: added,
-                tables_removed: removed,
                 tables_modified: modified,
             })
         }

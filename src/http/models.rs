@@ -189,7 +189,6 @@ pub struct SchemaRefreshResult {
     pub connections_refreshed: usize,
     pub tables_discovered: usize,
     pub tables_added: usize,
-    pub tables_removed: usize,
     pub tables_modified: usize,
 }
 
