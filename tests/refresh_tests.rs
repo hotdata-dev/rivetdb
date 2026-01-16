@@ -1767,3 +1767,115 @@ async fn test_rapid_sequential_refresh_same_table() -> Result<()> {
 
     Ok(())
 }
+
+/// Test that successful table refresh response omits empty warnings array.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_table_refresh_omits_empty_warnings() -> Result<()> {
+    let harness = RefreshTestHarness::new().await?;
+
+    // Create a DuckDB with known data
+    let db_path = harness.create_duckdb("warnings_test");
+
+    // Create connection
+    let connection_id = harness.create_connection("test_conn", &db_path).await?;
+
+    // Query to trigger initial sync
+    harness
+        .engine
+        .execute_query("SELECT * FROM test_conn.sales.orders")
+        .await?;
+
+    // Refresh data
+    let response = harness
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_REFRESH)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "connection_id": connection_id,
+                    "schema_name": "sales",
+                    "table_name": "orders",
+                    "data": true
+                }))?))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    // Verify warnings field is NOT present when empty (skip_serializing_if)
+    assert!(
+        json.get("warnings").is_none(),
+        "warnings field should be omitted when empty, got: {:?}",
+        json
+    );
+
+    // Verify other expected fields are present
+    assert!(json["rows_synced"].is_number());
+    assert!(json["duration_ms"].is_number());
+    assert!(json["connection_id"].is_string());
+
+    Ok(())
+}
+
+/// Test that successful connection refresh response omits empty warnings array.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_connection_refresh_omits_empty_warnings() -> Result<()> {
+    let harness = RefreshTestHarness::new().await?;
+
+    // Create a DuckDB with multiple tables
+    let db_path = harness.create_duckdb_multi_table("conn_warnings_test");
+
+    // Create connection
+    let connection_id = harness.create_connection("test_conn", &db_path).await?;
+
+    // Query both tables to trigger sync
+    harness
+        .engine
+        .execute_query("SELECT * FROM test_conn.sales.orders")
+        .await?;
+    harness
+        .engine
+        .execute_query("SELECT * FROM test_conn.sales.products")
+        .await?;
+
+    // Refresh all connection data
+    let response = harness
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_REFRESH)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&json!({
+                    "connection_id": connection_id,
+                    "data": true
+                }))?))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    // Verify warnings field is NOT present when empty (skip_serializing_if)
+    assert!(
+        json.get("warnings").is_none(),
+        "warnings field should be omitted when empty, got: {:?}",
+        json
+    );
+
+    // Verify other expected fields are present
+    assert!(json["total_rows"].is_number());
+    assert!(json["tables_refreshed"].is_number());
+    assert!(json["duration_ms"].is_number());
+
+    Ok(())
+}

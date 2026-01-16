@@ -245,3 +245,134 @@ pub enum RefreshResponse {
     Table(TableRefreshResult),
     Connection(ConnectionRefreshResult),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_table_refresh_result_omits_empty_warnings() {
+        let result = TableRefreshResult {
+            connection_id: "test".to_string(),
+            schema_name: "public".to_string(),
+            table_name: "users".to_string(),
+            rows_synced: 100,
+            duration_ms: 50,
+            warnings: vec![],
+        };
+
+        let json = serde_json::to_value(&result).unwrap();
+
+        assert!(
+            json.get("warnings").is_none(),
+            "empty warnings should be omitted"
+        );
+        assert_eq!(json["rows_synced"], 100);
+    }
+
+    #[test]
+    fn test_table_refresh_result_includes_warnings_when_present() {
+        let result = TableRefreshResult {
+            connection_id: "test".to_string(),
+            schema_name: "public".to_string(),
+            table_name: "users".to_string(),
+            rows_synced: 100,
+            duration_ms: 50,
+            warnings: vec![RefreshWarning {
+                schema_name: Some("public".to_string()),
+                table_name: Some("users".to_string()),
+                message: "Failed to schedule deletion".to_string(),
+            }],
+        };
+
+        let json = serde_json::to_value(&result).unwrap();
+
+        assert!(json.get("warnings").is_some(), "warnings should be present");
+        let warnings = json["warnings"].as_array().unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0]["message"], "Failed to schedule deletion");
+        assert_eq!(warnings[0]["schema_name"], "public");
+        assert_eq!(warnings[0]["table_name"], "users");
+    }
+
+    #[test]
+    fn test_connection_refresh_result_omits_empty_warnings() {
+        let result = ConnectionRefreshResult {
+            connection_id: "test".to_string(),
+            tables_refreshed: 5,
+            tables_failed: 0,
+            total_rows: 500,
+            duration_ms: 100,
+            errors: vec![],
+            warnings: vec![],
+        };
+
+        let json = serde_json::to_value(&result).unwrap();
+
+        assert!(
+            json.get("warnings").is_none(),
+            "empty warnings should be omitted"
+        );
+        assert_eq!(json["tables_refreshed"], 5);
+    }
+
+    #[test]
+    fn test_connection_refresh_result_includes_warnings_when_present() {
+        let result = ConnectionRefreshResult {
+            connection_id: "test".to_string(),
+            tables_refreshed: 5,
+            tables_failed: 0,
+            total_rows: 500,
+            duration_ms: 100,
+            errors: vec![],
+            warnings: vec![
+                RefreshWarning {
+                    schema_name: Some("public".to_string()),
+                    table_name: Some("orders".to_string()),
+                    message: "Failed to schedule deletion of old cache".to_string(),
+                },
+                RefreshWarning {
+                    schema_name: None,
+                    table_name: None,
+                    message: "General warning".to_string(),
+                },
+            ],
+        };
+
+        let json = serde_json::to_value(&result).unwrap();
+
+        assert!(json.get("warnings").is_some(), "warnings should be present");
+        let warnings = json["warnings"].as_array().unwrap();
+        assert_eq!(warnings.len(), 2);
+
+        // First warning has schema and table
+        assert_eq!(warnings[0]["schema_name"], "public");
+        assert_eq!(warnings[0]["table_name"], "orders");
+
+        // Second warning omits null schema/table fields
+        assert!(warnings[1].get("schema_name").is_none());
+        assert!(warnings[1].get("table_name").is_none());
+        assert_eq!(warnings[1]["message"], "General warning");
+    }
+
+    #[test]
+    fn test_refresh_warning_omits_none_fields() {
+        let warning = RefreshWarning {
+            schema_name: None,
+            table_name: None,
+            message: "Test warning".to_string(),
+        };
+
+        let json = serde_json::to_value(&warning).unwrap();
+
+        assert!(
+            json.get("schema_name").is_none(),
+            "None schema_name should be omitted"
+        );
+        assert!(
+            json.get("table_name").is_none(),
+            "None table_name should be omitted"
+        );
+        assert_eq!(json["message"], "Test warning");
+    }
+}
