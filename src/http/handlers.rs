@@ -2,10 +2,10 @@ use crate::datafetch::deserialize_arrow_schema;
 use crate::http::error::ApiError;
 use crate::http::models::{
     ColumnInfo, ConnectionInfo, CreateConnectionRequest, CreateConnectionResponse,
-    CreateSecretRequest, CreateSecretResponse, DiscoverConnectionResponse, DiscoveryStatus,
-    GetConnectionResponse, GetSecretResponse, InformationSchemaResponse, ListConnectionsResponse,
-    ListSecretsResponse, QueryRequest, QueryResponse, SecretMetadataResponse, TableInfo,
-    UpdateSecretRequest, UpdateSecretResponse,
+    CreateSecretRequest, CreateSecretResponse, DiscoveryStatus, GetConnectionResponse,
+    GetSecretResponse, InformationSchemaResponse, ListConnectionsResponse, ListSecretsResponse,
+    QueryRequest, QueryResponse, RefreshRequest, RefreshResponse, SchemaRefreshResult,
+    SecretMetadataResponse, TableInfo, UpdateSecretRequest, UpdateSecretResponse,
 };
 use crate::http::serialization::{encode_value_at, make_array_encoder};
 use crate::source::Source;
@@ -247,7 +247,7 @@ pub async fn create_connection_handler(
     let source_type = source.source_type().to_string();
 
     // Step 1: Register the connection
-    engine
+    let conn_id = engine
         .register_connection(&request.name, source)
         .await
         .map_err(|e| {
@@ -257,8 +257,8 @@ pub async fn create_connection_handler(
 
     // Step 2: Attempt discovery - catch errors and return partial success
     let (tables_discovered, discovery_status, discovery_error) =
-        match engine.discover_connection(&request.name).await {
-            Ok(count) => (count, DiscoveryStatus::Success, None),
+        match engine.refresh_schema(conn_id).await {
+            Ok((added, _)) => (added, DiscoveryStatus::Success, None),
             Err(e) => {
                 let root_cause = e.root_cause().to_string();
                 let msg = root_cause
@@ -292,43 +292,6 @@ pub async fn create_connection_handler(
             discovery_error,
         }),
     ))
-}
-
-/// Handler for POST /connections/{connection_id}/discover
-pub async fn discover_connection_handler(
-    State(engine): State<Arc<RuntimeEngine>>,
-    Path(connection_id): Path<String>,
-) -> Result<Json<DiscoverConnectionResponse>, ApiError> {
-    // Look up connection by external_id
-    let conn = engine
-        .catalog()
-        .get_connection_by_external_id(&connection_id)
-        .await?
-        .ok_or_else(|| ApiError::not_found(format!("Connection '{}' not found", connection_id)))?;
-
-    // Attempt discovery using connection name
-    let (tables_discovered, discovery_status, discovery_error) =
-        match engine.discover_connection(&conn.name).await {
-            Ok(count) => (count, DiscoveryStatus::Success, None),
-            Err(e) => {
-                let root_cause = e.root_cause().to_string();
-                let msg = root_cause
-                    .lines()
-                    .next()
-                    .unwrap_or("Unknown error")
-                    .to_string();
-                error!("Discovery failed for connection '{}': {}", conn.name, msg);
-                (0, DiscoveryStatus::Failed, Some(msg))
-            }
-        };
-
-    Ok(Json(DiscoverConnectionResponse {
-        id: conn.external_id,
-        name: conn.name,
-        tables_discovered,
-        discovery_status,
-        discovery_error,
-    }))
 }
 
 /// Handler for GET /connections
@@ -548,4 +511,103 @@ pub async fn delete_secret_handler(
     secret_manager.delete(&name).await?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Handler for POST /refresh
+pub async fn refresh_handler(
+    State(engine): State<Arc<RuntimeEngine>>,
+    Json(request): Json<RefreshRequest>,
+) -> Result<Json<RefreshResponse>, ApiError> {
+    // Validate request
+    if request.schema_name.is_some() && request.connection_id.is_none() {
+        return Err(ApiError::bad_request("schema_name requires connection_id"));
+    }
+    if request.table_name.is_some() && request.schema_name.is_none() {
+        return Err(ApiError::bad_request("table_name requires schema_name"));
+    }
+    if request.data && request.connection_id.is_none() {
+        return Err(ApiError::bad_request("data refresh requires connection_id"));
+    }
+
+    // Resolve connection_id from external ID to internal ID if provided
+    let conn_info = if let Some(ref external_id) = request.connection_id {
+        let conn = engine
+            .catalog()
+            .get_connection_by_external_id(external_id)
+            .await?
+            .ok_or_else(|| {
+                ApiError::not_found(format!("Connection '{}' not found", external_id))
+            })?;
+        Some((conn.id, external_id.clone()))
+    } else {
+        None
+    };
+
+    let response = match (
+        conn_info,
+        request.schema_name,
+        request.table_name,
+        request.data,
+    ) {
+        // Schema refresh: all connections
+        (None, None, None, false) => {
+            let result = engine.refresh_all_schemas().await?;
+            RefreshResponse::Schema(result)
+        }
+
+        // Schema refresh: single connection
+        (Some((conn_id, _)), None, None, false) => {
+            let (added, modified) = engine.refresh_schema(conn_id).await?;
+            let tables = engine.catalog().list_tables(Some(conn_id)).await?;
+            RefreshResponse::Schema(SchemaRefreshResult {
+                connections_refreshed: 1,
+                connections_failed: 0,
+                tables_discovered: tables.len(),
+                tables_added: added,
+                tables_modified: modified,
+                errors: Vec::new(),
+            })
+        }
+
+        // Data refresh: single table
+        (Some((conn_id, external_id)), Some(schema), Some(table), true) => {
+            let result = engine
+                .refresh_table_data(conn_id, &external_id, &schema, &table)
+                .await?;
+            RefreshResponse::Table(result)
+        }
+
+        // Data refresh: all tables in connection (or only cached tables by default)
+        (Some((conn_id, external_id)), None, None, true) => {
+            let result = engine
+                .refresh_connection_data(conn_id, &external_id, request.include_uncached)
+                .await?;
+            RefreshResponse::Connection(result)
+        }
+
+        // Invalid: schema-level refresh not supported
+        (Some(_), Some(_), None, false) => {
+            return Err(ApiError::bad_request(
+                "schema-level refresh not supported; omit schema_name to refresh entire connection",
+            ));
+        }
+
+        // Invalid: data refresh with schema but no table
+        (Some(_), Some(_), None, true) => {
+            return Err(ApiError::bad_request(
+                "data refresh with schema_name requires table_name",
+            ));
+        }
+
+        // Invalid: schema refresh cannot target specific table
+        (Some(_), Some(_), Some(_), false) => {
+            return Err(ApiError::bad_request(
+                "schema refresh cannot target specific table; use data: true for table data refresh",
+            ));
+        }
+
+        _ => unreachable!(),
+    };
+
+    Ok(Json(response))
 }

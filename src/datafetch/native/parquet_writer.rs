@@ -17,13 +17,18 @@ use crate::datafetch::DataFetchError;
 pub struct StreamingParquetWriter {
     path: PathBuf,
     writer: Option<ArrowWriter<File>>,
+    row_count: usize,
 }
 
 impl StreamingParquetWriter {
     /// Create a new writer that will write to the given path.
     /// Call `init()` before writing batches.
     pub fn new(path: PathBuf) -> Self {
-        Self { path, writer: None }
+        Self {
+            path,
+            writer: None,
+            row_count: 0,
+        }
     }
 
     /// Initialize the writer with the Arrow schema.
@@ -58,13 +63,15 @@ impl StreamingParquetWriter {
             DataFetchError::Storage("Writer not initialized - call init() first".into())
         })?;
 
+        self.row_count += batch.num_rows();
+
         writer
             .write(batch)
             .map_err(|e| DataFetchError::Storage(e.to_string()))
     }
 
-    /// Close the writer and return the path to the written file.
-    pub fn close(mut self) -> Result<PathBuf, DataFetchError> {
+    /// Close the writer and return the path to the written file along with the row count.
+    pub fn close(mut self) -> Result<(PathBuf, usize), DataFetchError> {
         let writer = self
             .writer
             .take()
@@ -74,7 +81,7 @@ impl StreamingParquetWriter {
             .close()
             .map_err(|e| DataFetchError::Storage(e.to_string()))?;
 
-        Ok(self.path)
+        Ok((self.path, self.row_count))
     }
 
     /// Get the path this writer will write to.
@@ -116,8 +123,9 @@ mod tests {
         writer.write_batch(&batch1).unwrap();
         writer.write_batch(&batch2).unwrap();
 
-        let result_path = writer.close().unwrap();
+        let (result_path, row_count) = writer.close().unwrap();
         assert_eq!(result_path, path);
+        assert_eq!(row_count, 6); // 3 rows from each batch
         assert!(path.exists());
     }
 
@@ -135,7 +143,8 @@ mod tests {
         let empty_batch = RecordBatch::new_empty(Arc::new(schema));
         writer.write_batch(&empty_batch).unwrap();
 
-        let result_path = writer.close().unwrap();
+        let (result_path, row_count) = writer.close().unwrap();
+        assert_eq!(row_count, 0);
         assert!(result_path.exists());
     }
 

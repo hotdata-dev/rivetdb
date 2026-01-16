@@ -74,17 +74,6 @@ pub struct CreateConnectionResponse {
     pub discovery_error: Option<String>,
 }
 
-/// Response body for POST /connections/{connection_id}/discover
-#[derive(Debug, Serialize)]
-pub struct DiscoverConnectionResponse {
-    pub id: String,
-    pub name: String,
-    pub tables_discovered: usize,
-    pub discovery_status: DiscoveryStatus,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub discovery_error: Option<String>,
-}
-
 /// Single connection metadata for API responses
 #[derive(Debug, Serialize)]
 pub struct ConnectionInfo {
@@ -168,4 +157,232 @@ pub struct GetSecretResponse {
     pub name: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+// Refresh endpoint models
+
+/// Request body for POST /refresh
+#[derive(Debug, Deserialize)]
+pub struct RefreshRequest {
+    pub connection_id: Option<String>,
+    pub schema_name: Option<String>,
+    pub table_name: Option<String>,
+    #[serde(default)]
+    pub data: bool,
+    /// Controls whether uncached tables are included in connection-wide data refresh.
+    ///
+    /// - `false` (default): Only refresh tables that already have cached parquet files.
+    ///   This is the common case for keeping existing data up-to-date.
+    /// - `true`: Also sync tables that haven't been cached yet, essentially performing
+    ///   an initial sync for any new tables discovered since the connection was created.
+    ///
+    /// This field only applies to connection-wide data refresh (when `data=true` and
+    /// `table_name` is not specified). It has no effect on single-table refresh or
+    /// schema refresh operations.
+    #[serde(default)]
+    pub include_uncached: bool,
+}
+
+/// Error details for a failed connection schema refresh
+#[derive(Debug, Serialize)]
+pub struct ConnectionSchemaError {
+    pub connection_id: String,
+    pub error: String,
+}
+
+/// Response for schema refresh operations
+#[derive(Debug, Serialize)]
+pub struct SchemaRefreshResult {
+    pub connections_refreshed: usize,
+    pub connections_failed: usize,
+    pub tables_discovered: usize,
+    pub tables_added: usize,
+    pub tables_modified: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<ConnectionSchemaError>,
+}
+
+/// Non-fatal warning that occurred during a refresh operation.
+/// Used to report issues like failed deletion scheduling that don't
+/// prevent the refresh from succeeding.
+#[derive(Debug, Clone, Serialize)]
+pub struct RefreshWarning {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub table_name: Option<String>,
+    pub message: String,
+}
+
+/// Response for single table data refresh
+#[derive(Debug, Serialize)]
+pub struct TableRefreshResult {
+    pub connection_id: String,
+    pub schema_name: String,
+    pub table_name: String,
+    pub rows_synced: usize,
+    pub duration_ms: u64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<RefreshWarning>,
+}
+
+/// Error details for a failed table refresh
+#[derive(Debug, Serialize)]
+pub struct TableRefreshError {
+    pub schema_name: String,
+    pub table_name: String,
+    pub error: String,
+}
+
+/// Response for connection-wide data refresh
+#[derive(Debug, Serialize)]
+pub struct ConnectionRefreshResult {
+    pub connection_id: String,
+    pub tables_refreshed: usize,
+    pub tables_failed: usize,
+    pub total_rows: usize,
+    pub duration_ms: u64,
+    pub errors: Vec<TableRefreshError>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<RefreshWarning>,
+}
+
+/// Unified response type for refresh operations
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub enum RefreshResponse {
+    Schema(SchemaRefreshResult),
+    Table(TableRefreshResult),
+    Connection(ConnectionRefreshResult),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_table_refresh_result_omits_empty_warnings() {
+        let result = TableRefreshResult {
+            connection_id: "test".to_string(),
+            schema_name: "public".to_string(),
+            table_name: "users".to_string(),
+            rows_synced: 100,
+            duration_ms: 50,
+            warnings: vec![],
+        };
+
+        let json = serde_json::to_value(&result).unwrap();
+
+        assert!(
+            json.get("warnings").is_none(),
+            "empty warnings should be omitted"
+        );
+        assert_eq!(json["rows_synced"], 100);
+    }
+
+    #[test]
+    fn test_table_refresh_result_includes_warnings_when_present() {
+        let result = TableRefreshResult {
+            connection_id: "test".to_string(),
+            schema_name: "public".to_string(),
+            table_name: "users".to_string(),
+            rows_synced: 100,
+            duration_ms: 50,
+            warnings: vec![RefreshWarning {
+                schema_name: Some("public".to_string()),
+                table_name: Some("users".to_string()),
+                message: "Failed to schedule deletion".to_string(),
+            }],
+        };
+
+        let json = serde_json::to_value(&result).unwrap();
+
+        assert!(json.get("warnings").is_some(), "warnings should be present");
+        let warnings = json["warnings"].as_array().unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0]["message"], "Failed to schedule deletion");
+        assert_eq!(warnings[0]["schema_name"], "public");
+        assert_eq!(warnings[0]["table_name"], "users");
+    }
+
+    #[test]
+    fn test_connection_refresh_result_omits_empty_warnings() {
+        let result = ConnectionRefreshResult {
+            connection_id: "test".to_string(),
+            tables_refreshed: 5,
+            tables_failed: 0,
+            total_rows: 500,
+            duration_ms: 100,
+            errors: vec![],
+            warnings: vec![],
+        };
+
+        let json = serde_json::to_value(&result).unwrap();
+
+        assert!(
+            json.get("warnings").is_none(),
+            "empty warnings should be omitted"
+        );
+        assert_eq!(json["tables_refreshed"], 5);
+    }
+
+    #[test]
+    fn test_connection_refresh_result_includes_warnings_when_present() {
+        let result = ConnectionRefreshResult {
+            connection_id: "test".to_string(),
+            tables_refreshed: 5,
+            tables_failed: 0,
+            total_rows: 500,
+            duration_ms: 100,
+            errors: vec![],
+            warnings: vec![
+                RefreshWarning {
+                    schema_name: Some("public".to_string()),
+                    table_name: Some("orders".to_string()),
+                    message: "Failed to schedule deletion of old cache".to_string(),
+                },
+                RefreshWarning {
+                    schema_name: None,
+                    table_name: None,
+                    message: "General warning".to_string(),
+                },
+            ],
+        };
+
+        let json = serde_json::to_value(&result).unwrap();
+
+        assert!(json.get("warnings").is_some(), "warnings should be present");
+        let warnings = json["warnings"].as_array().unwrap();
+        assert_eq!(warnings.len(), 2);
+
+        // First warning has schema and table
+        assert_eq!(warnings[0]["schema_name"], "public");
+        assert_eq!(warnings[0]["table_name"], "orders");
+
+        // Second warning omits null schema/table fields
+        assert!(warnings[1].get("schema_name").is_none());
+        assert!(warnings[1].get("table_name").is_none());
+        assert_eq!(warnings[1]["message"], "General warning");
+    }
+
+    #[test]
+    fn test_refresh_warning_omits_none_fields() {
+        let warning = RefreshWarning {
+            schema_name: None,
+            table_name: None,
+            message: "Test warning".to_string(),
+        };
+
+        let json = serde_json::to_value(&warning).unwrap();
+
+        assert!(
+            json.get("schema_name").is_none(),
+            "None schema_name should be omitted"
+        );
+        assert!(
+            json.get("table_name").is_none(),
+            "None table_name should be omitted"
+        );
+        assert_eq!(json["message"], "Test warning");
+    }
 }

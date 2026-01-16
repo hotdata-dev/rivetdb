@@ -1,25 +1,45 @@
 use crate::catalog::{CatalogManager, ConnectionInfo, SqliteCatalogManager, TableInfo};
-use crate::datafetch::{DataFetcher, FetchOrchestrator, NativeFetcher};
+use crate::datafetch::{FetchOrchestrator, NativeFetcher};
 use crate::datafusion::{
     block_on, InformationSchemaProvider, RuntimeCatalogProvider, RuntimeDbCatalogProvider,
+};
+use crate::http::models::{
+    ConnectionRefreshResult, ConnectionSchemaError, RefreshWarning, SchemaRefreshResult,
+    TableRefreshError, TableRefreshResult,
 };
 use crate::secrets::{EncryptedCatalogBackend, SecretManager, ENCRYPTED_PROVIDER_TYPE};
 use crate::source::Source;
 use crate::storage::{FilesystemStorage, StorageManager};
 use anyhow::Result;
+use chrono::Utc;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::catalog::CatalogProvider;
 use datafusion::prelude::*;
 use log::{info, warn};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::{Mutex, Semaphore};
+use tokio_util::sync::CancellationToken;
 use tracing::error;
 
 /// Default insecure encryption key for development use only.
 /// This key is publicly known and provides NO security.
 /// It is a base64-encoded 32-byte key: "INSECURE_DEFAULT_KEY_RUNTIMEDB!!"
 const DEFAULT_INSECURE_KEY: &str = "SU5TRUNVUkVfREVGQVVMVF9LRVlfUlVOVElNRURCISE=";
+
+/// Maximum number of retries for file deletion before giving up.
+/// After this many failures, the pending deletion record is removed
+/// and a warning is logged. This prevents indefinite accumulation
+/// of stuck deletion records.
+const MAX_DELETION_RETRIES: i32 = 5;
+
+/// Default number of parallel table refreshes for connection-wide data refresh.
+const DEFAULT_PARALLEL_REFRESH_COUNT: usize = 4;
+
+/// Default interval (in seconds) between deletion worker runs.
+const DEFAULT_DELETION_WORKER_INTERVAL_SECS: u64 = 30;
 
 pub struct QueryResponse {
     pub results: Vec<RecordBatch>,
@@ -33,6 +53,13 @@ pub struct RuntimeEngine {
     storage: Arc<dyn StorageManager>,
     orchestrator: Arc<FetchOrchestrator>,
     secret_manager: Arc<SecretManager>,
+    shutdown_token: CancellationToken,
+    deletion_worker_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    deletion_grace_period: Duration,
+    /// Stored for potential future restart capability; interval is passed to worker at start
+    #[allow(dead_code)]
+    deletion_worker_interval: Duration,
+    parallel_refresh_count: usize,
 }
 
 impl RuntimeEngine {
@@ -186,12 +213,12 @@ impl RuntimeEngine {
         Ok(())
     }
 
-    /// Delete parquet and state files for a specific table.
+    /// Delete cache directory for a specific table.
     async fn delete_table_files(&self, table_info: &TableInfo) -> Result<()> {
-        // Delete parquet file if it exists
+        // Delete versioned cache directory if it exists
         if let Some(parquet_path) = &table_info.parquet_path {
-            if let Err(e) = self.storage.delete(parquet_path).await {
-                warn!("Failed to delete parquet file {}: {}", parquet_path, e);
+            if let Err(e) = self.storage.delete_prefix(parquet_path).await {
+                warn!("Failed to delete cache directory {}: {}", parquet_path, e);
             }
         }
 
@@ -233,7 +260,7 @@ impl RuntimeEngine {
     ///
     /// This persists the connection config to the catalog and registers it with DataFusion,
     /// but does not attempt to connect to the remote database or discover tables.
-    /// Use `discover_connection()` to discover tables after registration.
+    /// Use `refresh_schema()` to discover tables after registration.
     pub async fn register_connection(&self, name: &str, source: Source) -> Result<i32> {
         let source_type = source.source_type();
 
@@ -260,57 +287,13 @@ impl RuntimeEngine {
         Ok(conn_id)
     }
 
-    /// Discover tables for an existing connection.
-    ///
-    /// Connects to the remote database, discovers available tables, and stores
-    /// their metadata in the catalog. Returns the number of tables discovered.
-    pub async fn discover_connection(&self, name: &str) -> Result<usize> {
-        // Get connection info
-        let conn = self
-            .catalog
-            .get_connection(name)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("Connection '{}' not found", name))?;
-
-        let source: Source = serde_json::from_str(&conn.config_json)?;
-        let source_type = source.source_type();
-
-        // Discover tables
-        info!("Discovering tables for {} source...", source_type);
-        let fetcher = crate::datafetch::NativeFetcher::new();
-        let tables = fetcher
-            .discover_tables(&source, &self.secret_manager)
-            .await
-            .map_err(|e| anyhow::anyhow!("Discovery failed: {}", e))?;
-
-        info!("Discovered {} tables", tables.len());
-
-        // Add discovered tables to catalog with schema
-        for table in &tables {
-            let schema = table.to_arrow_schema();
-            let schema_json = serde_json::to_string(schema.as_ref())
-                .map_err(|e| anyhow::anyhow!("Failed to serialize schema: {}", e))?;
-            self.catalog
-                .add_table(conn.id, &table.schema_name, &table.table_name, &schema_json)
-                .await?;
-        }
-
-        info!(
-            "Connection '{}' discovery complete: {} tables",
-            name,
-            tables.len()
-        );
-
-        Ok(tables.len())
-    }
-
     /// Connect to a new external data source and register it as a catalog.
     ///
     /// This is a convenience method that combines `register_connection()` and
-    /// `discover_connection()`. For more control, use those methods separately.
+    /// `refresh_schema()`. For more control, use those methods separately.
     pub async fn connect(&self, name: &str, source: Source) -> Result<()> {
-        self.register_connection(name, source).await?;
-        self.discover_connection(name).await?;
+        let conn_id = self.register_connection(name, source).await?;
+        self.refresh_schema(conn_id).await?;
         Ok(())
     }
 
@@ -480,12 +463,367 @@ impl RuntimeEngine {
     /// Shutdown the engine and close all connections.
     /// This should be called before the application exits to ensure proper cleanup.
     pub async fn shutdown(&self) -> Result<()> {
+        // Signal the deletion worker to stop
+        self.shutdown_token.cancel();
+
+        // Wait for the deletion worker to finish
+        if let Some(handle) = self.deletion_worker_handle.lock().await.take() {
+            // We use a timeout to avoid blocking forever if the worker is stuck
+            let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        }
+
         self.catalog.close().await
+    }
+
+    /// Schedule file deletion after grace period (persisted to database).
+    async fn schedule_file_deletion(&self, path: &str) -> Result<()> {
+        let grace_period = chrono::Duration::from_std(self.deletion_grace_period)
+            .map_err(|e| anyhow::anyhow!("Invalid grace period duration: {}", e))?;
+        let delete_after = Utc::now() + grace_period;
+        self.catalog
+            .schedule_file_deletion(path, delete_after)
+            .await
+    }
+
+    /// Refresh schema for a connection. Re-discovers tables from remote,
+    /// preserving cached data for existing tables.
+    ///
+    /// Tables that no longer exist in the remote source will remain in the catalog
+    /// (they are not automatically deleted).
+    ///
+    /// Returns counts of (added, modified).
+    pub async fn refresh_schema(&self, connection_id: i32) -> Result<(usize, usize)> {
+        let conn = self
+            .catalog
+            .get_connection_by_id(connection_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Connection not found"))?;
+
+        let existing_tables = self.catalog.list_tables(Some(connection_id)).await?;
+        let existing_set: HashSet<(String, String)> = existing_tables
+            .iter()
+            .map(|t| (t.schema_name.clone(), t.table_name.clone()))
+            .collect();
+
+        let source: Source = serde_json::from_str(&conn.config_json)?;
+        let discovered = self.orchestrator.discover_tables(&source).await?;
+
+        let current_set: HashSet<(String, String)> = discovered
+            .iter()
+            .map(|t| (t.schema_name.clone(), t.table_name.clone()))
+            .collect();
+
+        let added_count = current_set.difference(&existing_set).count();
+
+        let mut modified = 0;
+        for table in &discovered {
+            let schema_json = serde_json::to_string(&table.to_arrow_schema())?;
+
+            if let Some(existing) = existing_tables
+                .iter()
+                .find(|t| t.schema_name == table.schema_name && t.table_name == table.table_name)
+            {
+                if existing.arrow_schema_json.as_ref() != Some(&schema_json) {
+                    modified += 1;
+                }
+            }
+
+            self.catalog
+                .add_table(
+                    connection_id,
+                    &table.schema_name,
+                    &table.table_name,
+                    &schema_json,
+                )
+                .await?;
+        }
+
+        Ok((added_count, modified))
+    }
+
+    /// Refresh schema for all connections.
+    /// Continues processing remaining connections if one fails.
+    pub async fn refresh_all_schemas(&self) -> Result<SchemaRefreshResult> {
+        let connections = self.catalog.list_connections().await?;
+        let mut result = SchemaRefreshResult {
+            connections_refreshed: 0,
+            connections_failed: 0,
+            tables_discovered: 0,
+            tables_added: 0,
+            tables_modified: 0,
+            errors: Vec::new(),
+        };
+
+        for conn in connections {
+            match self.refresh_schema(conn.id).await {
+                Ok((added, modified)) => {
+                    result.connections_refreshed += 1;
+                    result.tables_added += added;
+                    result.tables_modified += modified;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        connection_id = conn.id,
+                        external_id = %conn.external_id,
+                        error = %e,
+                        "Failed to refresh schema for connection"
+                    );
+                    result.connections_failed += 1;
+                    result.errors.push(ConnectionSchemaError {
+                        connection_id: conn.external_id.clone(),
+                        error: e.to_string(),
+                    });
+                }
+            }
+        }
+
+        result.tables_discovered = self.catalog.list_tables(None).await?.len();
+        Ok(result)
+    }
+
+    /// Refresh data for a single table using atomic swap.
+    pub async fn refresh_table_data(
+        &self,
+        connection_id: i32,
+        external_id: &str,
+        schema_name: &str,
+        table_name: &str,
+    ) -> Result<TableRefreshResult> {
+        let start = std::time::Instant::now();
+        let mut warnings = Vec::new();
+
+        let conn = self
+            .catalog
+            .get_connection_by_id(connection_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Connection not found"))?;
+        let source: Source = serde_json::from_str(&conn.config_json)?;
+
+        let (_, old_path, rows_synced) = self
+            .orchestrator
+            .refresh_table(&source, connection_id, schema_name, table_name)
+            .await?;
+
+        if let Some(path) = old_path {
+            if let Err(e) = self.schedule_file_deletion(&path).await {
+                tracing::warn!(
+                    schema = schema_name,
+                    table = table_name,
+                    path = %path,
+                    error = %e,
+                    "Failed to schedule deletion of old cache file"
+                );
+                warnings.push(RefreshWarning {
+                    schema_name: Some(schema_name.to_string()),
+                    table_name: Some(table_name.to_string()),
+                    message: format!("Failed to schedule deletion of old cache: {}", e),
+                });
+            }
+        }
+
+        Ok(TableRefreshResult {
+            connection_id: external_id.to_string(),
+            schema_name: schema_name.to_string(),
+            table_name: table_name.to_string(),
+            rows_synced,
+            duration_ms: start.elapsed().as_millis() as u64,
+            warnings,
+        })
+    }
+
+    /// Refresh data for tables in a connection.
+    ///
+    /// By default, only refreshes tables that already have cached data (parquet_path is set).
+    /// Set `include_uncached` to true to also sync tables that haven't been cached yet.
+    pub async fn refresh_connection_data(
+        &self,
+        connection_id: i32,
+        external_id: &str,
+        include_uncached: bool,
+    ) -> Result<ConnectionRefreshResult> {
+        let start = std::time::Instant::now();
+        let all_tables = self.catalog.list_tables(Some(connection_id)).await?;
+
+        // By default, only refresh tables that already have cached data
+        let tables: Vec<_> = if include_uncached {
+            all_tables
+        } else {
+            all_tables
+                .into_iter()
+                .filter(|t| t.parquet_path.is_some())
+                .collect()
+        };
+
+        let conn = self
+            .catalog
+            .get_connection_by_id(connection_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Connection not found"))?;
+        let source: Source = serde_json::from_str(&conn.config_json)?;
+
+        let mut result = ConnectionRefreshResult {
+            connection_id: external_id.to_string(),
+            tables_refreshed: 0,
+            tables_failed: 0,
+            total_rows: 0,
+            duration_ms: 0,
+            errors: vec![],
+            warnings: vec![],
+        };
+
+        let semaphore = Arc::new(Semaphore::new(self.parallel_refresh_count));
+        let mut handles = vec![];
+
+        for table in tables {
+            let permit = semaphore.clone().acquire_owned().await?;
+            let orchestrator = self.orchestrator.clone();
+            let source = source.clone();
+            let schema_name = table.schema_name.clone();
+            let table_name = table.table_name.clone();
+
+            let handle = tokio::spawn(async move {
+                let result = orchestrator
+                    .refresh_table(&source, connection_id, &schema_name, &table_name)
+                    .await;
+                drop(permit);
+                (schema_name, table_name, result)
+            });
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            let (schema_name, table_name, refresh_result) = handle.await?;
+            match refresh_result {
+                Ok((_, old_path, rows_synced)) => {
+                    result.tables_refreshed += 1;
+                    result.total_rows += rows_synced;
+                    if let Some(path) = old_path {
+                        if let Err(e) = self.schedule_file_deletion(&path).await {
+                            tracing::warn!(
+                                schema = %schema_name,
+                                table = %table_name,
+                                path = %path,
+                                error = %e,
+                                "Failed to schedule deletion of old cache file"
+                            );
+                            result.warnings.push(RefreshWarning {
+                                schema_name: Some(schema_name.clone()),
+                                table_name: Some(table_name.clone()),
+                                message: format!("Failed to schedule deletion of old cache: {}", e),
+                            });
+                        }
+                    }
+                }
+                Err(e) => {
+                    result.tables_failed += 1;
+                    result.errors.push(TableRefreshError {
+                        schema_name,
+                        table_name,
+                        error: e.to_string(),
+                    });
+                }
+            }
+        }
+
+        result.duration_ms = start.elapsed().as_millis() as u64;
+        Ok(result)
+    }
+
+    /// Process any pending directory deletions that are due.
+    pub async fn process_pending_deletions(&self) -> Result<usize> {
+        let pending = self.catalog.get_pending_deletions().await?;
+        let mut deleted = 0;
+
+        for deletion in pending {
+            match self.storage.delete_prefix(&deletion.path).await {
+                Ok(_) => {
+                    self.catalog.remove_pending_deletion(deletion.id).await?;
+                    deleted += 1;
+                }
+                Err(e) => {
+                    warn!("Failed to delete {}: {}", deletion.path, e);
+                }
+            }
+        }
+
+        Ok(deleted)
+    }
+
+    /// Start background task that processes pending deletions periodically.
+    /// Returns the JoinHandle for the spawned task.
+    fn start_deletion_worker(
+        catalog: Arc<dyn CatalogManager>,
+        storage: Arc<dyn StorageManager>,
+        shutdown_token: CancellationToken,
+        interval_duration: Duration,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(interval_duration);
+            loop {
+                tokio::select! {
+                    _ = shutdown_token.cancelled() => {
+                        info!("Deletion worker received shutdown signal");
+                        break;
+                    }
+                    _ = interval.tick() => {
+                        let pending = match catalog.get_pending_deletions().await {
+                            Ok(p) => p,
+                            Err(e) => {
+                                warn!("Failed to get pending deletions: {}", e);
+                                continue;
+                            }
+                        };
+
+                        for deletion in pending {
+                            match storage.delete_prefix(&deletion.path).await {
+                                Ok(_) => {
+                                    // Successfully deleted - remove the record
+                                    if let Err(e) = catalog.remove_pending_deletion(deletion.id).await {
+                                        warn!("Failed to remove deletion record {}: {}", deletion.id, e);
+                                    }
+                                }
+                                Err(e) => {
+                                    // Failed to delete - increment retry count
+                                    warn!(
+                                        "Failed to delete {} (attempt {}): {}",
+                                        deletion.path,
+                                        deletion.retry_count + 1,
+                                        e
+                                    );
+
+                                    match catalog.increment_deletion_retry(deletion.id).await {
+                                        Ok(new_count) if new_count >= MAX_DELETION_RETRIES => {
+                                            // Max retries reached - give up and remove record
+                                            warn!(
+                                                "Giving up on deleting {} after {} failed attempts",
+                                                deletion.path, new_count
+                                            );
+                                            if let Err(e) = catalog.remove_pending_deletion(deletion.id).await {
+                                                warn!("Failed to remove stuck deletion record {}: {}", deletion.id, e);
+                                            }
+                                        }
+                                        Ok(_) => {
+                                            // Will retry on next interval
+                                        }
+                                        Err(e) => {
+                                            warn!("Failed to increment retry count for {}: {}", deletion.id, e);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        })
     }
 }
 
 impl Drop for RuntimeEngine {
     fn drop(&mut self) {
+        // Signal the deletion worker to stop
+        self.shutdown_token.cancel();
+
         // Ensure catalog connection is closed when engine is dropped
         let _ = block_on(self.catalog.close());
     }
@@ -524,6 +862,9 @@ pub struct RuntimeEngineBuilder {
     catalog: Option<Arc<dyn CatalogManager>>,
     storage: Option<Arc<dyn StorageManager>>,
     secret_key: Option<String>,
+    deletion_grace_period: Duration,
+    deletion_worker_interval: Duration,
+    parallel_refresh_count: usize,
 }
 
 impl Default for RuntimeEngineBuilder {
@@ -531,6 +872,9 @@ impl Default for RuntimeEngineBuilder {
         Self::new()
     }
 }
+
+/// Default grace period for file deletion (60 seconds).
+const DEFAULT_DELETION_GRACE_PERIOD: Duration = Duration::from_secs(60);
 
 impl RuntimeEngineBuilder {
     pub fn new() -> Self {
@@ -540,6 +884,9 @@ impl RuntimeEngineBuilder {
             catalog: None,
             storage: None,
             secret_key: std::env::var("RUNTIMEDB_SECRET_KEY").ok(),
+            deletion_grace_period: DEFAULT_DELETION_GRACE_PERIOD,
+            deletion_worker_interval: Duration::from_secs(DEFAULT_DELETION_WORKER_INTERVAL_SECS),
+            parallel_refresh_count: DEFAULT_PARALLEL_REFRESH_COUNT,
         }
     }
 
@@ -576,6 +923,32 @@ impl RuntimeEngineBuilder {
     /// If neither is set, uses a default insecure key (with loud warnings).
     pub fn secret_key(mut self, key: impl Into<String>) -> Self {
         self.secret_key = Some(key.into());
+        self
+    }
+
+    /// Set the grace period for file deletion.
+    /// When cached files are replaced during refresh operations, the old files
+    /// are scheduled for deletion after this grace period to allow in-flight
+    /// queries to complete. Defaults to 60 seconds.
+    pub fn deletion_grace_period(mut self, duration: Duration) -> Self {
+        self.deletion_grace_period = duration;
+        self
+    }
+
+    /// Set the interval between deletion worker runs.
+    /// The deletion worker processes pending file deletions periodically.
+    /// Defaults to 30 seconds.
+    pub fn deletion_worker_interval(mut self, duration: Duration) -> Self {
+        self.deletion_worker_interval = duration;
+        self
+    }
+
+    /// Set the number of parallel table refreshes for connection-wide data refresh.
+    /// Higher values may speed up refresh for connections with many small tables,
+    /// but could overwhelm the source database. Defaults to 4. Minimum value is 1
+    /// (values less than 1 are clamped to 1 to prevent deadlock).
+    pub fn parallel_refresh_count(mut self, count: usize) -> Self {
+        self.parallel_refresh_count = count.max(1);
         self
     }
 
@@ -681,12 +1054,28 @@ impl RuntimeEngineBuilder {
             secret_manager.clone(),
         ));
 
+        // Create shutdown token for graceful shutdown
+        let shutdown_token = CancellationToken::new();
+
+        // Start background deletion worker
+        let deletion_worker_handle = RuntimeEngine::start_deletion_worker(
+            catalog.clone(),
+            storage.clone(),
+            shutdown_token.clone(),
+            self.deletion_worker_interval,
+        );
+
         let mut engine = RuntimeEngine {
             catalog,
             df_ctx,
             storage,
             orchestrator,
             secret_manager,
+            shutdown_token,
+            deletion_worker_handle: Mutex::new(Some(deletion_worker_handle)),
+            deletion_grace_period: self.deletion_grace_period,
+            deletion_worker_interval: self.deletion_worker_interval,
+            parallel_refresh_count: self.parallel_refresh_count,
         };
 
         // Register all existing connections as DataFusion catalogs
@@ -701,6 +1090,11 @@ impl RuntimeEngineBuilder {
         engine
             .df_ctx
             .register_catalog("runtimedb", runtimedb_catalog);
+
+        // Process any pending deletions from previous runs
+        if let Err(e) = engine.process_pending_deletions().await {
+            warn!("Failed to process pending deletions on startup: {}", e);
+        }
 
         Ok(engine)
     }
@@ -812,6 +1206,109 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn test_deletion_worker_stops_on_shutdown() {
+        let temp_dir = TempDir::new().unwrap();
+        let base_dir = temp_dir.path().to_path_buf();
+
+        // Create engine
+        let engine = RuntimeEngine::builder()
+            .base_dir(base_dir)
+            .secret_key(test_secret_key())
+            .build()
+            .await
+            .unwrap();
+
+        // Verify the worker handle exists before shutdown
+        assert!(
+            engine.deletion_worker_handle.lock().await.is_some(),
+            "Worker handle should exist after engine creation"
+        );
+
+        // Trigger shutdown
+        engine.shutdown().await.unwrap();
+
+        // After shutdown, we should be able to verify the worker task completed
+        // The handle should have been awaited during shutdown
+        // Note: We can't check the handle directly after shutdown since it's consumed,
+        // but we can verify the shutdown token was cancelled
+
+        // Schedule a deletion in the past
+        let past = Utc::now() - chrono::Duration::seconds(10);
+        engine
+            .catalog
+            .schedule_file_deletion("/tmp/test.parquet", past)
+            .await
+            .unwrap();
+
+        // Wait a bit - if worker was still running, it would process this
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // The deletion should still be pending (worker stopped)
+        let due = engine.catalog.get_pending_deletions().await.unwrap();
+        assert_eq!(
+            due.len(),
+            1,
+            "Worker should have stopped and not processed deletion"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_configurable_deletion_grace_period() {
+        let temp_dir = TempDir::new().unwrap();
+        let base_dir = temp_dir.path().to_path_buf();
+
+        // Create engine with a custom grace period of 300 seconds (5 minutes)
+        let custom_grace_period = Duration::from_secs(300);
+        let engine = RuntimeEngine::builder()
+            .base_dir(base_dir)
+            .secret_key(test_secret_key())
+            .deletion_grace_period(custom_grace_period)
+            .build()
+            .await
+            .unwrap();
+
+        // Schedule a file deletion
+        engine
+            .schedule_file_deletion("/tmp/test_grace_period.parquet")
+            .await
+            .unwrap();
+
+        // Get the pending deletions - should not be due yet since grace period is 5 minutes
+        let pending = engine.catalog.get_pending_deletions().await.unwrap();
+        assert!(
+            pending.is_empty(),
+            "With 300s grace period, deletion should not be due immediately"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_default_deletion_grace_period() {
+        let temp_dir = TempDir::new().unwrap();
+        let base_dir = temp_dir.path().to_path_buf();
+
+        // Create engine with default grace period (should be 60 seconds)
+        let engine = RuntimeEngine::builder()
+            .base_dir(base_dir)
+            .secret_key(test_secret_key())
+            .build()
+            .await
+            .unwrap();
+
+        // Schedule a file deletion
+        engine
+            .schedule_file_deletion("/tmp/test_default_grace.parquet")
+            .await
+            .unwrap();
+
+        // Verify it's not immediately due (within the grace period)
+        let pending = engine.catalog.get_pending_deletions().await.unwrap();
+        assert!(
+            pending.is_empty(),
+            "With default 60s grace period, deletion should not be due immediately"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_from_config_sqlite_filesystem() {
         use crate::config::{
             AppConfig, CatalogConfig, PathsConfig, SecretsConfig, ServerConfig, StorageConfig,
@@ -860,5 +1357,23 @@ mod tests {
         // Verify we can list connections
         let connections = engine.list_connections().await;
         assert!(connections.is_ok(), "Should be able to list connections");
+    }
+
+    #[test]
+    fn test_parallel_refresh_count_clamps_to_minimum_one() {
+        // Test that parallel_refresh_count is clamped to at least 1
+        // to prevent deadlock on semaphore acquisition
+        let builder = RuntimeEngineBuilder::new().parallel_refresh_count(0);
+        assert_eq!(
+            builder.parallel_refresh_count, 1,
+            "parallel_refresh_count should be clamped to 1 when set to 0"
+        );
+
+        // Values >= 1 should be preserved
+        let builder = RuntimeEngineBuilder::new().parallel_refresh_count(5);
+        assert_eq!(builder.parallel_refresh_count, 5);
+
+        let builder = RuntimeEngineBuilder::new().parallel_refresh_count(1);
+        assert_eq!(builder.parallel_refresh_count, 1);
     }
 }

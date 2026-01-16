@@ -79,6 +79,7 @@ where
     ConnectionInfo: for<'r> FromRow<'r, DB::Row>,
     TableInfo: for<'r> FromRow<'r, DB::Row>,
     for<'q> &'q str: Encode<'q, DB> + Type<DB>,
+    for<'q> String: Encode<'q, DB> + Type<DB>,
     for<'q> i32: Encode<'q, DB> + Type<DB>,
     for<'r> i32: Decode<'r, DB>,
     for<'q> <DB as Database>::Arguments<'q>: IntoArguments<'q, DB> + Send,
@@ -369,6 +370,27 @@ where
             .execute(&self.pool)
             .await?;
 
+        Ok(())
+    }
+
+    pub async fn get_connection_by_id(&self, id: i32) -> Result<Option<ConnectionInfo>> {
+        let sql = format!(
+            "SELECT id, external_id, name, source_type, config_json FROM connections WHERE id = {}",
+            DB::bind_param(1)
+        );
+        query_as::<DB, ConnectionInfo>(&sql)
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn remove_pending_deletion(&self, id: i32) -> Result<()> {
+        let sql = format!(
+            "DELETE FROM pending_deletions WHERE id = {}",
+            DB::bind_param(1)
+        );
+        query(&sql).bind(id).execute(&self.pool).await?;
         Ok(())
     }
 }

@@ -538,7 +538,7 @@ async fn sqlite_unknown_migration_fails() {
     let db_path = dir.path().join("catalog.sqlite");
     let db_uri = format!("sqlite:{}?mode=rwc", db_path.display());
 
-    // Manually create schema_migrations table with v2 (which doesn't exist in compiled code)
+    // Manually create schema_migrations table with v99 (which doesn't exist in compiled code)
     let pool = SqlitePool::connect(&db_uri).await.unwrap();
     sqlx::query(
         "CREATE TABLE schema_migrations (
@@ -550,13 +550,13 @@ async fn sqlite_unknown_migration_fails() {
     .execute(&pool)
     .await
     .unwrap();
-    sqlx::query("INSERT INTO schema_migrations (version, hash) VALUES (2, 'somehash')")
+    sqlx::query("INSERT INTO schema_migrations (version, hash) VALUES (99, 'somehash')")
         .execute(&pool)
         .await
         .unwrap();
     pool.close().await;
 
-    // Try to run migrations - should fail because v2 doesn't exist in compiled code
+    // Try to run migrations - should fail because v99 doesn't exist in compiled code
     let manager = SqliteCatalogManager::new(db_path.to_str().unwrap())
         .await
         .unwrap();
@@ -565,8 +565,8 @@ async fn sqlite_unknown_migration_fails() {
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
     assert!(
-        err.contains("v2") && err.contains("only knows up to"),
-        "Expected error about unknown migration v2, got: {}",
+        err.contains("v99") && err.contains("only knows up to"),
+        "Expected error about unknown migration v99, got: {}",
         err
     );
 }

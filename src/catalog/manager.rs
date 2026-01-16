@@ -43,6 +43,17 @@ pub struct TableInfo {
     pub arrow_schema_json: Option<String>,
 }
 
+/// Record for deferred file deletion (survives restarts)
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct PendingDeletion {
+    pub id: i32,
+    pub path: String,
+    pub delete_after: DateTime<Utc>,
+    /// Number of failed deletion attempts. After MAX_DELETION_RETRIES,
+    /// the record is removed to prevent indefinite accumulation.
+    pub retry_count: i32,
+}
+
 /// Async interface for catalog operations.
 #[async_trait]
 pub trait CatalogManager: Debug + Send + Sync {
@@ -92,6 +103,26 @@ pub trait CatalogManager: Debug + Send + Sync {
 
     /// Delete connection and all associated table rows from metadata.
     async fn delete_connection(&self, name: &str) -> Result<()>;
+
+    /// Get connection by internal ID.
+    async fn get_connection_by_id(&self, id: i32) -> Result<Option<ConnectionInfo>>;
+
+    // NOTE: Stale table detection (tables removed from remote source) is intentionally
+    // not implemented. The naive approach of comparing discovered vs existing tables
+    // is error-prone and doesn't handle data cleanup properly. Stale tables will
+    // remain in the catalog until a more robust solution is implemented.
+
+    /// Schedule a file path for deletion after a grace period.
+    async fn schedule_file_deletion(&self, path: &str, delete_after: DateTime<Utc>) -> Result<()>;
+
+    /// Get all pending file deletions that are due for cleanup.
+    async fn get_pending_deletions(&self) -> Result<Vec<PendingDeletion>>;
+
+    /// Increment the retry count for a failed deletion. Returns the new count.
+    async fn increment_deletion_retry(&self, id: i32) -> Result<i32>;
+
+    /// Remove a pending deletion record after successful delete or max retries.
+    async fn remove_pending_deletion(&self, id: i32) -> Result<()>;
 
     // Secret management methods - metadata (used by all secret providers)
 

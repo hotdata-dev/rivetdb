@@ -1,5 +1,7 @@
 use crate::catalog::backend::CatalogBackend;
-use crate::catalog::manager::{CatalogManager, ConnectionInfo, OptimisticLock, TableInfo};
+use crate::catalog::manager::{
+    CatalogManager, ConnectionInfo, OptimisticLock, PendingDeletion, TableInfo,
+};
 use crate::catalog::migrations::{
     run_migrations, wrap_migration_sql, CatalogMigrations, Migration, POSTGRES_MIGRATIONS,
 };
@@ -136,6 +138,48 @@ impl CatalogManager for PostgresCatalogManager {
 
     async fn delete_connection(&self, name: &str) -> Result<()> {
         self.backend.delete_connection(name).await
+    }
+
+    async fn get_connection_by_id(&self, id: i32) -> Result<Option<ConnectionInfo>> {
+        self.backend.get_connection_by_id(id).await
+    }
+
+    async fn schedule_file_deletion(&self, path: &str, delete_after: DateTime<Utc>) -> Result<()> {
+        // Use native TIMESTAMPTZ binding for Postgres (not RFC3339 string)
+        // ON CONFLICT DO NOTHING silently ignores duplicates when path already exists
+        sqlx::query(
+            "INSERT INTO pending_deletions (path, delete_after) VALUES ($1, $2) ON CONFLICT (path) DO NOTHING",
+        )
+        .bind(path)
+        .bind(delete_after)
+        .execute(self.backend.pool())
+        .await?;
+        Ok(())
+    }
+
+    async fn get_pending_deletions(&self) -> Result<Vec<PendingDeletion>> {
+        // Use native TIMESTAMPTZ comparison for Postgres (not RFC3339 string)
+        sqlx::query_as(
+            "SELECT id, path, delete_after, retry_count FROM pending_deletions WHERE delete_after <= $1",
+        )
+        .bind(Utc::now())
+        .fetch_all(self.backend.pool())
+        .await
+        .map_err(Into::into)
+    }
+
+    async fn increment_deletion_retry(&self, id: i32) -> Result<i32> {
+        let new_count: (i32,) = sqlx::query_as(
+            "UPDATE pending_deletions SET retry_count = retry_count + 1 WHERE id = $1 RETURNING retry_count",
+        )
+        .bind(id)
+        .fetch_one(self.backend.pool())
+        .await?;
+        Ok(new_count.0)
+    }
+
+    async fn remove_pending_deletion(&self, id: i32) -> Result<()> {
+        self.backend.remove_pending_deletion(id).await
     }
 
     async fn get_secret_metadata(&self, name: &str) -> Result<Option<SecretMetadata>> {

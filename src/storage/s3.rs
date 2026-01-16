@@ -6,9 +6,10 @@ use futures::TryStreamExt;
 use object_store::aws::AmazonS3Builder;
 use object_store::{path::Path as ObjectPath, ObjectStore};
 use std::sync::Arc;
+use tracing::warn;
 use url::Url;
 
-use super::{S3Credentials, StorageManager};
+use super::{CacheWriteHandle, S3Credentials, StorageManager};
 
 #[derive(Debug, Clone)]
 struct S3Config {
@@ -150,32 +151,217 @@ impl StorageManager for S3Storage {
 
     fn prepare_cache_write(
         &self,
-        _connection_id: i32,
-        _schema: &str,
-        table: &str,
-    ) -> std::path::PathBuf {
-        // Temp file path - will be uploaded to correct S3 location
-        std::env::temp_dir().join(format!("{}-{}.parquet", table, uuid::Uuid::new_v4()))
-    }
-
-    async fn finalize_cache_write(
-        &self,
-        written_path: &std::path::Path,
         connection_id: i32,
         schema: &str,
         table: &str,
-    ) -> Result<String> {
-        let data = std::fs::read(written_path)?;
+    ) -> CacheWriteHandle {
+        // Use versioned DIRECTORIES to avoid duplicate reads during grace period.
+        // Path structure: {temp_dir}/{conn_id}/{schema}/{table}/{version}/data.parquet
+        // This matches the S3 destination structure for consistency.
+        let version = nanoid::nanoid!(8);
+        let local_path = std::env::temp_dir()
+            .join(connection_id.to_string())
+            .join(schema)
+            .join(table)
+            .join(&version)
+            .join("data.parquet");
 
-        // Get the directory URL (s3://bucket/cache/conn_id/schema/table)
-        let dir_url = self.cache_url(connection_id, schema, table);
+        CacheWriteHandle {
+            local_path,
+            version,
+            connection_id,
+            schema: schema.to_string(),
+            table: table.to_string(),
+        }
+    }
 
-        // Write file INSIDE the directory
-        let file_url = format!("{}/{}.parquet", dir_url, table);
+    async fn finalize_cache_write(&self, handle: &CacheWriteHandle) -> Result<String> {
+        let data = std::fs::read(&handle.local_path)?;
+
+        // Build S3 URL using the version from the handle
+        let versioned_dir_url = format!(
+            "s3://{}/cache/{}/{}/{}/{}",
+            self.bucket, handle.connection_id, handle.schema, handle.table, handle.version
+        );
+        let file_url = format!("{}/data.parquet", versioned_dir_url);
+
         self.write(&file_url, &data).await?;
 
-        std::fs::remove_file(written_path)?;
+        // Clean up local temp file - log warning but don't fail if removal fails
+        // since the S3 upload succeeded and that's what matters
+        if let Err(e) = std::fs::remove_file(&handle.local_path) {
+            warn!(
+                path = %handle.local_path.display(),
+                error = %e,
+                "Failed to remove local temp file after S3 upload; file may be orphaned"
+            );
+        }
 
-        Ok(dir_url) // Return directory URL for ListingTable
+        Ok(versioned_dir_url)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cache_write_handle_unique_versions() {
+        let storage = S3Storage {
+            bucket: "test-bucket".to_string(),
+            store: Arc::new(object_store::memory::InMemory::new()),
+            config: None,
+        };
+
+        let handle1 = storage.prepare_cache_write(1, "main", "orders");
+        let handle2 = storage.prepare_cache_write(1, "main", "orders");
+        assert_ne!(
+            handle1.version, handle2.version,
+            "Versions should be unique"
+        );
+        assert_ne!(
+            handle1.local_path, handle2.local_path,
+            "Paths should be unique"
+        );
+    }
+
+    #[test]
+    fn test_cache_write_handle_structure() {
+        let storage = S3Storage {
+            bucket: "test-bucket".to_string(),
+            store: Arc::new(object_store::memory::InMemory::new()),
+            config: None,
+        };
+
+        let handle = storage.prepare_cache_write(42, "public", "users");
+        let path_str = handle.local_path.to_string_lossy();
+
+        assert_eq!(handle.connection_id, 42);
+        assert_eq!(handle.schema, "public");
+        assert_eq!(handle.table, "users");
+        assert!(!handle.version.is_empty(), "Version should not be empty");
+
+        assert!(
+            path_str.contains("/42/"),
+            "Path should contain connection_id"
+        );
+        assert!(path_str.contains("/public/"), "Path should contain schema");
+        assert!(
+            path_str.contains("/users/"),
+            "Path should contain table directory"
+        );
+        assert!(
+            path_str.contains(&handle.version),
+            "Path should contain version"
+        );
+        assert!(
+            path_str.ends_with("/data.parquet"),
+            "Path should end with /data.parquet"
+        );
+    }
+
+    #[test]
+    fn test_versioned_directories_are_separate() {
+        let storage = S3Storage {
+            bucket: "test-bucket".to_string(),
+            store: Arc::new(object_store::memory::InMemory::new()),
+            config: None,
+        };
+
+        let handle1 = storage.prepare_cache_write(1, "main", "orders");
+        let handle2 = storage.prepare_cache_write(1, "main", "orders");
+
+        // Both should end with data.parquet
+        assert!(handle1.local_path.ends_with("data.parquet"));
+        assert!(handle2.local_path.ends_with("data.parquet"));
+
+        // But their parent directories (version dirs) should be different
+        let dir1 = handle1.local_path.parent().unwrap();
+        let dir2 = handle2.local_path.parent().unwrap();
+        assert_ne!(dir1, dir2, "Version directories should be different");
+
+        // And both should be under the same table directory
+        let table_dir1 = dir1.parent().unwrap();
+        let table_dir2 = dir2.parent().unwrap();
+        assert_eq!(
+            table_dir1, table_dir2,
+            "Both should be under same table dir"
+        );
+    }
+
+    #[test]
+    fn test_versioned_s3_url_format() {
+        let bucket = "my-bucket";
+        let connection_id = 42;
+        let schema = "public";
+        let table = "users";
+        let version = "abc12345";
+
+        let versioned_dir_url = format!(
+            "s3://{}/cache/{}/{}/{}/{}",
+            bucket, connection_id, schema, table, version
+        );
+        let file_url = format!("{}/data.parquet", versioned_dir_url);
+
+        assert_eq!(
+            versioned_dir_url,
+            "s3://my-bucket/cache/42/public/users/abc12345"
+        );
+        assert_eq!(
+            file_url,
+            "s3://my-bucket/cache/42/public/users/abc12345/data.parquet"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_finalize_cache_write_uploads_to_correct_s3_path() {
+        let store = Arc::new(object_store::memory::InMemory::new());
+        let storage = S3Storage {
+            bucket: "test-bucket".to_string(),
+            store: store.clone(),
+            config: None,
+        };
+
+        // Create a handle with known version
+        let version = "testver1";
+        let temp_base = std::env::temp_dir().join("s3_test_finalize");
+        let versioned_dir = temp_base
+            .join("1")
+            .join("public")
+            .join("orders")
+            .join(version);
+        std::fs::create_dir_all(&versioned_dir).unwrap();
+
+        let temp_file = versioned_dir.join("data.parquet");
+        std::fs::write(&temp_file, b"test parquet data").unwrap();
+
+        let handle = CacheWriteHandle {
+            local_path: temp_file,
+            version: version.to_string(),
+            connection_id: 1,
+            schema: "public".to_string(),
+            table: "orders".to_string(),
+        };
+
+        let result_url = storage.finalize_cache_write(&handle).await.unwrap();
+
+        // Verify the returned URL contains the version
+        assert!(
+            result_url.contains(version),
+            "Result URL should contain version: {}",
+            result_url
+        );
+        assert_eq!(
+            result_url,
+            format!("s3://test-bucket/cache/1/public/orders/{}", version)
+        );
+
+        // Verify the file was uploaded to the correct S3 path
+        let s3_path = ObjectPath::from(format!("cache/1/public/orders/{}/data.parquet", version));
+        let result = store.get(&s3_path).await;
+        assert!(result.is_ok(), "File should exist at versioned S3 path");
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&temp_base);
     }
 }
