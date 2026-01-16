@@ -12,6 +12,7 @@ use chrono::{DateTime, Utc};
 use sqlx::{Sqlite, SqlitePool};
 use std::fmt::{self, Debug, Formatter};
 use std::str::FromStr;
+use tracing::warn;
 
 pub struct SqliteCatalogManager {
     backend: CatalogBackend<Sqlite>,
@@ -52,10 +53,21 @@ struct PendingDeletionRow {
 
 impl PendingDeletionRow {
     fn into_pending_deletion(self) -> PendingDeletion {
+        let delete_after = self.delete_after.parse().unwrap_or_else(|e| {
+            // Log warning but use a far-future date to avoid premature deletion.
+            // This prevents data loss if timestamps become corrupted.
+            warn!(
+                path = %self.path,
+                raw_timestamp = %self.delete_after,
+                error = %e,
+                "Failed to parse pending deletion timestamp; deferring deletion by 24 hours"
+            );
+            Utc::now() + chrono::Duration::hours(24)
+        });
         PendingDeletion {
             id: self.id,
             path: self.path,
-            delete_after: self.delete_after.parse().unwrap_or_else(|_| Utc::now()),
+            delete_after,
         }
     }
 }

@@ -169,8 +169,16 @@ pub struct RefreshRequest {
     pub table_name: Option<String>,
     #[serde(default)]
     pub data: bool,
-    /// When true, refresh all tables including those without cached data.
-    /// Default is false: only refresh tables that already have parquet files.
+    /// Controls whether uncached tables are included in connection-wide data refresh.
+    ///
+    /// - `false` (default): Only refresh tables that already have cached parquet files.
+    ///   This is the common case for keeping existing data up-to-date.
+    /// - `true`: Also sync tables that haven't been cached yet, essentially performing
+    ///   an initial sync for any new tables discovered since the connection was created.
+    ///
+    /// This field only applies to connection-wide data refresh (when `data=true` and
+    /// `table_name` is not specified). It has no effect on single-table refresh or
+    /// schema refresh operations.
     #[serde(default)]
     pub include_uncached: bool,
 }

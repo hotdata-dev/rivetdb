@@ -28,6 +28,9 @@ fn generate_test_secret_key() -> String {
 struct RefreshTestHarness {
     engine: Arc<RuntimeEngine>,
     router: Router,
+    /// Kept alive for the duration of the test to ensure the temp directory
+    /// (containing SQLite catalog and parquet cache) is not deleted until
+    /// the harness is dropped.
     #[allow(dead_code)]
     temp_dir: TempDir,
 }
