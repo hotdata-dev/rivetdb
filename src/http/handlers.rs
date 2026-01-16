@@ -561,9 +561,11 @@ pub async fn refresh_handler(
             let tables = engine.catalog().list_tables(Some(conn_id)).await?;
             RefreshResponse::Schema(SchemaRefreshResult {
                 connections_refreshed: 1,
+                connections_failed: 0,
                 tables_discovered: tables.len(),
                 tables_added: added,
                 tables_modified: modified,
+                errors: Vec::new(),
             })
         }
 

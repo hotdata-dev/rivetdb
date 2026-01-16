@@ -183,13 +183,23 @@ pub struct RefreshRequest {
     pub include_uncached: bool,
 }
 
+/// Error details for a failed connection schema refresh
+#[derive(Debug, Serialize)]
+pub struct ConnectionSchemaError {
+    pub connection_id: String,
+    pub error: String,
+}
+
 /// Response for schema refresh operations
 #[derive(Debug, Serialize)]
 pub struct SchemaRefreshResult {
     pub connections_refreshed: usize,
+    pub connections_failed: usize,
     pub tables_discovered: usize,
     pub tables_added: usize,
     pub tables_modified: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<ConnectionSchemaError>,
 }
 
 /// Non-fatal warning that occurred during a refresh operation.

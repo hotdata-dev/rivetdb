@@ -4,8 +4,8 @@ use crate::datafusion::{
     block_on, InformationSchemaProvider, RuntimeCatalogProvider, RuntimeDbCatalogProvider,
 };
 use crate::http::models::{
-    ConnectionRefreshResult, RefreshWarning, SchemaRefreshResult, TableRefreshError,
-    TableRefreshResult,
+    ConnectionRefreshResult, ConnectionSchemaError, RefreshWarning, SchemaRefreshResult,
+    TableRefreshError, TableRefreshResult,
 };
 use crate::secrets::{EncryptedCatalogBackend, SecretManager, ENCRYPTED_PROVIDER_TYPE};
 use crate::source::Source;
@@ -542,20 +542,39 @@ impl RuntimeEngine {
     }
 
     /// Refresh schema for all connections.
+    /// Continues processing remaining connections if one fails.
     pub async fn refresh_all_schemas(&self) -> Result<SchemaRefreshResult> {
         let connections = self.catalog.list_connections().await?;
         let mut result = SchemaRefreshResult {
             connections_refreshed: 0,
+            connections_failed: 0,
             tables_discovered: 0,
             tables_added: 0,
             tables_modified: 0,
+            errors: Vec::new(),
         };
 
         for conn in connections {
-            let (added, modified) = self.refresh_schema(conn.id).await?;
-            result.connections_refreshed += 1;
-            result.tables_added += added;
-            result.tables_modified += modified;
+            match self.refresh_schema(conn.id).await {
+                Ok((added, modified)) => {
+                    result.connections_refreshed += 1;
+                    result.tables_added += added;
+                    result.tables_modified += modified;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        connection_id = conn.id,
+                        external_id = %conn.external_id,
+                        error = %e,
+                        "Failed to refresh schema for connection"
+                    );
+                    result.connections_failed += 1;
+                    result.errors.push(ConnectionSchemaError {
+                        connection_id: conn.external_id.clone(),
+                        error: e.to_string(),
+                    });
+                }
+            }
         }
 
         result.tables_discovered = self.catalog.list_tables(None).await?.len();
