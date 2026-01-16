@@ -192,6 +192,18 @@ pub struct SchemaRefreshResult {
     pub tables_modified: usize,
 }
 
+/// Non-fatal warning that occurred during a refresh operation.
+/// Used to report issues like failed deletion scheduling that don't
+/// prevent the refresh from succeeding.
+#[derive(Debug, Clone, Serialize)]
+pub struct RefreshWarning {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub table_name: Option<String>,
+    pub message: String,
+}
+
 /// Response for single table data refresh
 #[derive(Debug, Serialize)]
 pub struct TableRefreshResult {
@@ -200,6 +212,8 @@ pub struct TableRefreshResult {
     pub table_name: String,
     pub rows_synced: usize,
     pub duration_ms: u64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<RefreshWarning>,
 }
 
 /// Error details for a failed table refresh
@@ -219,6 +233,8 @@ pub struct ConnectionRefreshResult {
     pub total_rows: usize,
     pub duration_ms: u64,
     pub errors: Vec<TableRefreshError>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<RefreshWarning>,
 }
 
 /// Unified response type for refresh operations

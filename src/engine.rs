@@ -4,7 +4,8 @@ use crate::datafusion::{
     block_on, InformationSchemaProvider, RuntimeCatalogProvider, RuntimeDbCatalogProvider,
 };
 use crate::http::models::{
-    ConnectionRefreshResult, SchemaRefreshResult, TableRefreshError, TableRefreshResult,
+    ConnectionRefreshResult, RefreshWarning, SchemaRefreshResult, TableRefreshError,
+    TableRefreshResult,
 };
 use crate::secrets::{EncryptedCatalogBackend, SecretManager, ENCRYPTED_PROVIDER_TYPE};
 use crate::source::Source;
@@ -570,6 +571,7 @@ impl RuntimeEngine {
         table_name: &str,
     ) -> Result<TableRefreshResult> {
         let start = std::time::Instant::now();
+        let mut warnings = Vec::new();
 
         let conn = self
             .catalog
@@ -584,7 +586,20 @@ impl RuntimeEngine {
             .await?;
 
         if let Some(path) = old_path {
-            self.schedule_file_deletion(&path).await?;
+            if let Err(e) = self.schedule_file_deletion(&path).await {
+                tracing::warn!(
+                    schema = schema_name,
+                    table = table_name,
+                    path = %path,
+                    error = %e,
+                    "Failed to schedule deletion of old cache file"
+                );
+                warnings.push(RefreshWarning {
+                    schema_name: Some(schema_name.to_string()),
+                    table_name: Some(table_name.to_string()),
+                    message: format!("Failed to schedule deletion of old cache: {}", e),
+                });
+            }
         }
 
         Ok(TableRefreshResult {
@@ -593,6 +608,7 @@ impl RuntimeEngine {
             table_name: table_name.to_string(),
             rows_synced,
             duration_ms: start.elapsed().as_millis() as u64,
+            warnings,
         })
     }
 
@@ -633,6 +649,7 @@ impl RuntimeEngine {
             total_rows: 0,
             duration_ms: 0,
             errors: vec![],
+            warnings: vec![],
         };
 
         let semaphore = Arc::new(Semaphore::new(self.parallel_refresh_count));
@@ -662,7 +679,20 @@ impl RuntimeEngine {
                     result.tables_refreshed += 1;
                     result.total_rows += rows_synced;
                     if let Some(path) = old_path {
-                        self.schedule_file_deletion(&path).await?;
+                        if let Err(e) = self.schedule_file_deletion(&path).await {
+                            tracing::warn!(
+                                schema = %schema_name,
+                                table = %table_name,
+                                path = %path,
+                                error = %e,
+                                "Failed to schedule deletion of old cache file"
+                            );
+                            result.warnings.push(RefreshWarning {
+                                schema_name: Some(schema_name.clone()),
+                                table_name: Some(table_name.clone()),
+                                message: format!("Failed to schedule deletion of old cache: {}", e),
+                            });
+                        }
                     }
                 }
                 Err(e) => {
