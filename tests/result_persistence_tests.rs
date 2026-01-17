@@ -35,23 +35,44 @@ async fn setup_test() -> Result<(AppServer, TempDir)> {
     Ok((app, temp_dir))
 }
 
-/// A storage backend that delegates to FilesystemStorage but can be configured to fail.
+/// Configurable failure points for storage operations.
+#[derive(Debug, Default)]
+struct FailureConfig {
+    /// Fail at finalize_cache_write
+    fail_finalize: AtomicBool,
+    /// Return an invalid/unwritable path from prepare_cache_write to cause writer.init() to fail
+    fail_prepare_path: AtomicBool,
+}
+
+/// A storage backend that delegates to FilesystemStorage but can be configured to fail
+/// at different points in the persistence flow.
 #[derive(Debug)]
 struct FailingStorage {
     inner: FilesystemStorage,
-    fail_finalize: AtomicBool,
+    config: FailureConfig,
 }
 
 impl FailingStorage {
     fn new(base_dir: &std::path::Path) -> Self {
         Self {
             inner: FilesystemStorage::new(base_dir.to_str().expect("valid UTF-8 path")),
-            fail_finalize: AtomicBool::new(false),
+            config: FailureConfig::default(),
         }
     }
 
+    /// Configure failure at finalize_cache_write stage
     fn set_fail_finalize(&self, should_fail: bool) {
-        self.fail_finalize.store(should_fail, Ordering::SeqCst);
+        self.config
+            .fail_finalize
+            .store(should_fail, Ordering::SeqCst);
+    }
+
+    /// Configure failure at prepare_cache_write stage by returning an unwritable path.
+    /// This causes the parquet writer's init() to fail when trying to create the directory.
+    fn set_fail_prepare_path(&self, should_fail: bool) {
+        self.config
+            .fail_prepare_path
+            .store(should_fail, Ordering::SeqCst);
     }
 }
 
@@ -95,12 +116,20 @@ impl StorageManager for FailingStorage {
         schema: &str,
         table: &str,
     ) -> CacheWriteHandle {
-        self.inner.prepare_cache_write(connection_id, schema, table)
+        let mut handle = self.inner.prepare_cache_write(connection_id, schema, table);
+
+        // If configured to fail, replace the local path with an unwritable one
+        // Using /dev/null/invalid causes directory creation to fail on Unix
+        if self.config.fail_prepare_path.load(Ordering::SeqCst) {
+            handle.local_path = std::path::PathBuf::from("/dev/null/impossible/path/data.parquet");
+        }
+
+        handle
     }
 
     async fn finalize_cache_write(&self, handle: &CacheWriteHandle) -> Result<String> {
-        if self.fail_finalize.load(Ordering::SeqCst) {
-            anyhow::bail!("Injected storage failure for testing")
+        if self.config.fail_finalize.load(Ordering::SeqCst) {
+            anyhow::bail!("Injected storage failure at finalize")
         }
         self.inner.finalize_cache_write(handle).await
     }
@@ -549,6 +578,214 @@ async fn test_multiple_queries_with_storage_failure() -> Result<()> {
             i
         );
     }
+
+    Ok(())
+}
+
+/// Test that parquet writer init failure (bad path) results in null result_id with warning.
+/// This tests the failure path at writer.init() stage.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_writer_init_failure_returns_null_result_id_with_warning() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let cache_dir = temp_dir.path().join("cache");
+
+    // Create a storage backend that returns an unwritable path
+    let failing_storage = Arc::new(FailingStorage::new(&cache_dir));
+    failing_storage.set_fail_prepare_path(true);
+
+    let engine = RuntimeEngine::builder()
+        .base_dir(temp_dir.path())
+        .storage(failing_storage)
+        .secret_key(generate_test_secret_key())
+        .build()
+        .await?;
+
+    let app = AppServer::new(engine);
+
+    // Query should still succeed, but with warning due to writer init failure
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_QUERY)
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"sql": "SELECT 1 as num"}).to_string()))?,
+        )
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
+
+    // result_id should be null due to writer init failure
+    assert!(
+        json.get("result_id").is_some(),
+        "result_id field should be present"
+    );
+    assert!(
+        json["result_id"].is_null(),
+        "result_id should be null on writer init failure"
+    );
+
+    // Should have warning explaining the failure
+    assert!(
+        json.get("warning").is_some(),
+        "warning field should be present"
+    );
+    let warning = json["warning"].as_str().unwrap();
+    assert!(
+        warning.contains("not persisted"),
+        "warning should explain persistence failure: {}",
+        warning
+    );
+
+    // Should still have the query results
+    assert_eq!(json["row_count"], 1);
+    assert_eq!(json["rows"][0][0], 1);
+
+    Ok(())
+}
+
+/// Test that different failure stages all produce consistent error handling.
+/// This tests both init failure and finalize failure in the same test.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_different_failure_stages_produce_consistent_warnings() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let cache_dir = temp_dir.path().join("cache");
+
+    let failing_storage = Arc::new(FailingStorage::new(&cache_dir));
+
+    let engine = RuntimeEngine::builder()
+        .base_dir(temp_dir.path())
+        .storage(failing_storage.clone())
+        .secret_key(generate_test_secret_key())
+        .build()
+        .await?;
+
+    let app = AppServer::new(engine);
+
+    // Test 1: Init failure (bad path)
+    failing_storage.set_fail_prepare_path(true);
+    failing_storage.set_fail_finalize(false);
+
+    let response1 = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_QUERY)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"sql": "SELECT 'init_fail' as stage"}).to_string(),
+                ))?,
+        )
+        .await?;
+
+    assert_eq!(response1.status(), StatusCode::OK);
+    let body1 = axum::body::to_bytes(response1.into_body(), usize::MAX).await?;
+    let json1: serde_json::Value = serde_json::from_slice(&body1)?;
+
+    assert!(
+        json1["result_id"].is_null(),
+        "Init failure should have null result_id"
+    );
+    assert!(
+        json1.get("warning").is_some(),
+        "Init failure should have warning"
+    );
+    assert_eq!(
+        json1["rows"][0][0], "init_fail",
+        "Should return correct data despite init failure"
+    );
+
+    // Test 2: Finalize failure
+    failing_storage.set_fail_prepare_path(false);
+    failing_storage.set_fail_finalize(true);
+
+    let response2 = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_QUERY)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"sql": "SELECT 'finalize_fail' as stage"}).to_string(),
+                ))?,
+        )
+        .await?;
+
+    assert_eq!(response2.status(), StatusCode::OK);
+    let body2 = axum::body::to_bytes(response2.into_body(), usize::MAX).await?;
+    let json2: serde_json::Value = serde_json::from_slice(&body2)?;
+
+    assert!(
+        json2["result_id"].is_null(),
+        "Finalize failure should have null result_id"
+    );
+    assert!(
+        json2.get("warning").is_some(),
+        "Finalize failure should have warning"
+    );
+    assert_eq!(
+        json2["rows"][0][0], "finalize_fail",
+        "Should return correct data despite finalize failure"
+    );
+
+    // Test 3: No failure - should succeed
+    failing_storage.set_fail_prepare_path(false);
+    failing_storage.set_fail_finalize(false);
+
+    let response3 = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(PATH_QUERY)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"sql": "SELECT 'success' as stage"}).to_string(),
+                ))?,
+        )
+        .await?;
+
+    assert_eq!(response3.status(), StatusCode::OK);
+    let body3 = axum::body::to_bytes(response3.into_body(), usize::MAX).await?;
+    let json3: serde_json::Value = serde_json::from_slice(&body3)?;
+
+    assert!(
+        json3["result_id"].is_string(),
+        "Success should have valid result_id"
+    );
+    assert!(
+        json3.get("warning").is_none(),
+        "Success should not have warning"
+    );
+    assert_eq!(
+        json3["rows"][0][0], "success",
+        "Should return correct data on success"
+    );
+
+    // Verify we can retrieve the successful result
+    let result_id = json3["result_id"].as_str().unwrap();
+    let get_response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/results/{}", result_id))
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(get_response.status(), StatusCode::OK);
 
     Ok(())
 }
