@@ -1,6 +1,6 @@
 use crate::catalog::backend::CatalogBackend;
 use crate::catalog::manager::{
-    CatalogManager, ConnectionInfo, OptimisticLock, PendingDeletion, TableInfo,
+    CatalogManager, ConnectionInfo, OptimisticLock, PendingDeletion, QueryResult, TableInfo,
 };
 use crate::catalog::migrations::{
     run_migrations, wrap_migration_sql, CatalogMigrations, Migration, SQLITE_MIGRATIONS,
@@ -362,6 +362,29 @@ impl CatalogManager for SqliteCatalogManager {
 
     async fn remove_pending_deletion(&self, id: i32) -> Result<()> {
         self.backend.remove_pending_deletion(id).await
+    }
+
+    async fn store_result(&self, result: &QueryResult) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO results (id, parquet_path, created_at)
+             VALUES (?, ?, ?)",
+        )
+        .bind(&result.id)
+        .bind(&result.parquet_path)
+        .bind(result.created_at)
+        .execute(self.backend.pool())
+        .await?;
+        Ok(())
+    }
+
+    async fn get_result(&self, id: &str) -> Result<Option<QueryResult>> {
+        let result = sqlx::query_as::<_, QueryResult>(
+            "SELECT id, parquet_path, created_at FROM results WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(self.backend.pool())
+        .await?;
+        Ok(result)
     }
 }
 

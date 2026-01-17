@@ -1,4 +1,6 @@
+use crate::catalog::QueryResult;
 use crate::datafetch::deserialize_arrow_schema;
+use crate::datafetch::native::StreamingParquetWriter;
 use crate::http::error::ApiError;
 use crate::http::models::{
     ColumnInfo, ConnectionInfo, CreateConnectionRequest, CreateConnectionResponse,
@@ -15,11 +17,17 @@ use axum::{
     http::StatusCode,
     Json,
 };
+use chrono::Utc;
+use datafusion::arrow::datatypes::Schema;
+use datafusion::arrow::record_batch::RecordBatch;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
-use tracing::error;
+use tracing::{error, warn};
+
+/// Connection ID used for internal runtimedb storage (results, etc.)
+const INTERNAL_CONNECTION_ID: i32 = 0;
 
 /// Handler for POST /query
 pub async fn query_handler(
@@ -36,26 +44,115 @@ pub async fn query_handler(
     let result = engine.execute_query(&request.sql).await?;
     let execution_time_ms = start.elapsed().as_millis() as u64;
 
-    // Convert arrow batches to JSON
     let batches = &result.results;
+    let schema = &result.schema;
 
-    // Get column names from schema
-    let columns: Vec<String> = if let Some(batch) = batches.first() {
-        batch
-            .schema()
-            .fields()
-            .iter()
-            .map(|f| f.name().clone())
-            .collect()
-    } else {
-        Vec::new()
+    // Persist result and get ID
+    let result_id = match persist_query_result(&engine, schema, batches).await {
+        Ok(id) => id,
+        Err(e) => {
+            // Log error but don't fail the request - result persistence is best-effort
+            warn!("Failed to persist query result: {}", e);
+            nanoid::nanoid!() // Generate ID anyway so response is consistent
+        }
     };
+
+    // Serialize results for HTTP response
+    let (columns, rows) = serialize_batches(schema, batches)?;
+    let row_count = rows.len();
+
+    Ok(Json(QueryResponse {
+        result_id,
+        columns,
+        rows,
+        row_count,
+        execution_time_ms,
+    }))
+}
+
+/// Persist query result to storage and catalog.
+async fn persist_query_result(
+    engine: &RuntimeEngine,
+    schema: &Arc<Schema>,
+    batches: &[RecordBatch],
+) -> Result<String, ApiError> {
+    let result_id = nanoid::nanoid!();
+
+    // Write to parquet
+    let parquet_path = write_results_to_parquet(engine, &result_id, schema, batches).await?;
+
+    // Store in catalog
+    let query_result = QueryResult {
+        id: result_id.clone(),
+        parquet_path,
+        created_at: Utc::now(),
+    };
+
+    engine
+        .catalog()
+        .store_result(&query_result)
+        .await
+        .map_err(|e| ApiError::internal_error(format!("Failed to store result: {}", e)))?;
+
+    Ok(result_id)
+}
+
+/// Write result batches to a parquet file.
+///
+/// Note: Empty results are persisted with schema only. This ensures GET /results/{id}
+/// works for all result IDs returned by POST /query. A future optimization could avoid
+/// persisting empty results entirely if storage space becomes a concern.
+async fn write_results_to_parquet(
+    engine: &RuntimeEngine,
+    result_id: &str,
+    schema: &Arc<Schema>,
+    batches: &[RecordBatch],
+) -> Result<String, ApiError> {
+    let storage = engine.storage();
+
+    // Prepare write location - using result_id as both schema and table
+    // This creates path: {base}/0/runtimedb_results/{result_id}/{version}/data.parquet
+    let handle =
+        storage.prepare_cache_write(INTERNAL_CONNECTION_ID, "runtimedb_results", result_id);
+
+    // Write parquet file
+    let mut writer = StreamingParquetWriter::new(handle.local_path.clone());
+    writer.init(&schema).map_err(|e| {
+        ApiError::internal_error(format!("Failed to initialize parquet writer: {}", e))
+    })?;
+
+    for batch in batches {
+        writer.write_batch(batch).map_err(|e| {
+            ApiError::internal_error(format!("Failed to write batch to parquet: {}", e))
+        })?;
+    }
+
+    writer
+        .close()
+        .map_err(|e| ApiError::internal_error(format!("Failed to close parquet writer: {}", e)))?;
+
+    // Finalize (uploads to S3 if needed) and get directory URL
+    let dir_url = storage.finalize_cache_write(&handle).await.map_err(|e| {
+        ApiError::internal_error(format!("Failed to finalize parquet write: {}", e))
+    })?;
+
+    // Directory URL already includes the version subdirectory, and the file is data.parquet
+    let file_url = format!("{}/data.parquet", dir_url);
+    Ok(file_url)
+}
+
+/// Serialize record batches to columns and rows for JSON response.
+fn serialize_batches(
+    schema: &Arc<Schema>,
+    batches: &[RecordBatch],
+) -> Result<(Vec<String>, Vec<Vec<serde_json::Value>>), ApiError> {
+    // Get column names from schema
+    let columns: Vec<String> = schema.fields().iter().map(|f| f.name().clone()).collect();
 
     // Convert rows to JSON values
     let mut rows: Vec<Vec<serde_json::Value>> = Vec::new();
 
     for batch in batches {
-        // Create encoders once per batch (one per column)
         let schema = batch.schema();
         let mut encoders: Vec<_> = batch
             .columns()
@@ -65,7 +162,6 @@ pub async fn query_handler(
             .collect::<Result<_, _>>()
             .map_err(|e| ApiError::internal_error(format!("Failed to create encoder: {}", e)))?;
 
-        // Process all rows using the pre-created encoders
         for row_idx in 0..batch.num_rows() {
             let row_values: Vec<serde_json::Value> = encoders
                 .iter_mut()
@@ -75,14 +171,29 @@ pub async fn query_handler(
         }
     }
 
-    let row_count = rows.len();
+    Ok((columns, rows))
+}
 
-    Ok(Json(QueryResponse {
-        columns,
-        rows,
-        row_count,
-        execution_time_ms,
-    }))
+/// Load results from a parquet file.
+pub async fn load_parquet_results(
+    ctx: &datafusion::prelude::SessionContext,
+    parquet_path: &str,
+) -> Result<(Arc<Schema>, Vec<RecordBatch>), ApiError> {
+    let df = ctx
+        .read_parquet(
+            parquet_path,
+            datafusion::prelude::ParquetReadOptions::default(),
+        )
+        .await
+        .map_err(|e| ApiError::internal_error(format!("Failed to read result: {}", e)))?;
+
+    let schema = Arc::new(Schema::from(df.schema()));
+    let batches = df
+        .collect()
+        .await
+        .map_err(|e| ApiError::internal_error(format!("Failed to collect result: {}", e)))?;
+
+    Ok((schema, batches))
 }
 
 /// Handler for GET /information_schema
@@ -610,4 +721,36 @@ pub async fn refresh_handler(
     };
 
     Ok(Json(response))
+}
+
+/// Handler for GET /results/{id}
+pub async fn get_result_handler(
+    State(engine): State<Arc<RuntimeEngine>>,
+    Path(id): Path<String>,
+) -> Result<Json<QueryResponse>, ApiError> {
+    let start = Instant::now();
+
+    // Look up result in catalog
+    let result = engine
+        .catalog()
+        .get_result(&id)
+        .await
+        .map_err(|e| ApiError::internal_error(format!("Failed to lookup result: {}", e)))?
+        .ok_or_else(|| ApiError::not_found(format!("Result '{}' not found", id)))?;
+
+    // Load results from parquet
+    let (schema, batches) =
+        load_parquet_results(engine.session_context(), &result.parquet_path).await?;
+
+    let (columns, rows) = serialize_batches(&schema, &batches)?;
+    let row_count = rows.len();
+    let execution_time_ms = start.elapsed().as_millis() as u64;
+
+    Ok(Json(QueryResponse {
+        result_id: result.id,
+        columns,
+        rows,
+        row_count,
+        execution_time_ms,
+    }))
 }

@@ -8,9 +8,10 @@ pub struct QueryRequest {
     pub sql: String,
 }
 
-/// Response body for POST /query
+/// Response body for POST /query and GET /results/{id}
 #[derive(Debug, Serialize)]
 pub struct QueryResponse {
+    pub result_id: String,
     pub columns: Vec<String>,
     pub rows: Vec<Vec<serde_json::Value>>,
     pub row_count: usize,

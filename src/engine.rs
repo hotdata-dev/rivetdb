@@ -12,6 +12,7 @@ use crate::source::Source;
 use crate::storage::{FilesystemStorage, StorageManager};
 use anyhow::Result;
 use chrono::Utc;
+use datafusion::arrow::datatypes::Schema;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::catalog::CatalogProvider;
 use datafusion::prelude::*;
@@ -42,6 +43,7 @@ const DEFAULT_PARALLEL_REFRESH_COUNT: usize = 4;
 const DEFAULT_DELETION_WORKER_INTERVAL_SECS: u64 = 30;
 
 pub struct QueryResponse {
+    pub schema: Arc<Schema>,
     pub results: Vec<RecordBatch>,
     pub execution_time: Duration,
 }
@@ -230,6 +232,11 @@ impl RuntimeEngine {
         &self.storage
     }
 
+    /// Get a reference to the DataFusion session context.
+    pub fn session_context(&self) -> &SessionContext {
+        &self.df_ctx
+    }
+
     /// Get a reference to the secret manager.
     pub fn secret_manager(&self) -> &Arc<SecretManager> {
         &self.secret_manager
@@ -329,6 +336,7 @@ impl RuntimeEngine {
             error!("Error executing query: {}", e);
             e
         })?;
+        let schema = Arc::new(Schema::from(df.schema()));
         let results = df.collect().await.map_err(|e| {
             error!("Error getting query result: {}", e);
             e
@@ -337,6 +345,7 @@ impl RuntimeEngine {
         info!("Results available");
 
         Ok(QueryResponse {
+            schema,
             execution_time: start.elapsed(),
             results,
         })
