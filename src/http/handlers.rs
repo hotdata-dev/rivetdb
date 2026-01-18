@@ -77,7 +77,7 @@ async fn persist_query_result(
     schema: &Arc<Schema>,
     batches: &[RecordBatch],
 ) -> Result<String, ApiError> {
-    let result_id = nanoid::nanoid!();
+    let result_id = format!("rslt{}", nanoid::nanoid!(26));
 
     // Write to parquet
     let parquet_path = write_results_to_parquet(engine, &result_id, schema, batches).await?;
