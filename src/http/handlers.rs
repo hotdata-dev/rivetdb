@@ -42,6 +42,7 @@ pub async fn query_handler(
     let schema = &result.schema;
 
     // Persist result and get ID (best-effort - don't fail query on persistence error)
+    // todo: this likely should be entirely rolled into the engine (e.g. execute_query_and_persist(..)
     let (result_id, warning) = match engine.persist_result(schema, batches).await {
         Ok(id) => (Some(id), None),
         Err(e) => {
